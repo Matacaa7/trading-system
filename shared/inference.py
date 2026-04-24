@@ -58,18 +58,19 @@ def load_models(modelos_cfg: list[dict]) -> list[dict]:
                 sb.table("silver_model_registry")
                 .select(
                     "model_name,file_path,feature_columns,"
-                    "scaler_params,feature_source,timeframe"
+                    "scaler_params,feature_source,timeframe,version"
                 )
                 .eq("experiment_name", exp_name)
-                .single()
+                .eq("is_active", True)
+                .limit(1)
                 .execute()
             )
 
             if not resp.data:
-                log.warning(f"  {exp_name} no encontrado en registry — omitiendo")
+                log.warning(f"  {exp_name} no encontrado (o sin versión activa) — omitiendo")
                 continue
 
-            meta = resp.data
+            meta = resp.data[0]
             model_name = meta["model_name"]
             feature_cols = json.loads(meta["feature_columns"])
             scaler_params = (
@@ -106,7 +107,7 @@ def load_models(modelos_cfg: list[dict]) -> list[dict]:
                 "feature_source": meta.get("feature_source", "silver"),
                 "model_name": model_name,
             })
-            log.info(f"  OK: {exp_name} (peso: {m_cfg['peso']})")
+            log.info(f"  OK: {exp_name} v{meta.get('version', '?')} (peso: {m_cfg['peso']})")
 
         except Exception as e:
             log.error(f"  Error cargando {exp_name}: {e}")

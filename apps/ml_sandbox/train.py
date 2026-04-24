@@ -109,57 +109,63 @@ def _register_model(
     timeframe: str,
     scaler_params: dict | None,
 ) -> None:
-    """Registra el modelo en silver_model_registry."""
+    """Registra nueva versión del modelo en silver_model_registry (D-16).
 
-    # Buscar modelo anterior para borrar fichero DESPUÉS del upsert (F-50)
-    old_file_path: Path | None = None
+    Cada re-entrenamiento crea una versión nueva. La anterior se
+    desactiva pero NO se borra (permite rollback y A/B testing).
+    """
+    exp_name = cfg.experiment.name
+
+    # 1. Obtener versión actual más alta
     try:
-        resp_old = (
+        resp = (
             sb.table("silver_model_registry")
-            .select("file_path")
-            .eq("experiment_name", cfg.experiment.name)
-            .single()
+            .select("version")
+            .eq("experiment_name", exp_name)
+            .order("version", desc=True)
+            .limit(1)
             .execute()
         )
-        if resp_old.data and resp_old.data.get("file_path"):
-            old_file_path = Path(resp_old.data["file_path"])
+        current_max = resp.data[0]["version"] if resp.data else 0
     except Exception:
-        pass
+        current_max = 0
 
-    # Upsert con metadatos completos
+    new_version = current_max + 1
+
+    # 2. Desactivar versiones anteriores
     try:
-        sb.table("silver_model_registry").upsert(
-            {
-                "experiment_name": cfg.experiment.name,
-                "model_name": cfg.model.name,
-                "task": cfg.experiment.task,
-                "interval": timeframe,
-                "train_start": cfg.data.train_start,
-                "train_end": cfg.data.train_end,
-                "test_start": cfg.data.test_start,
-                "test_end": cfg.data.test_end,
-                "file_path": str(file_path) if file_path else None,
-                "feature_columns": json.dumps(feature_names),
-                "feature_source": feature_source,
-                "timeframe": timeframe,
-                "scaler_params": json.dumps(scaler_params) if scaler_params else None,
-                "metrics_summary": json.dumps({"duration_s": duration_s}),
-            },
-            on_conflict="experiment_name",
-        ).execute()
+        sb.table("silver_model_registry").update(
+            {"is_active": False}
+        ).eq("experiment_name", exp_name).execute()
+    except Exception as e:
+        log.warning(f"Error desactivando versiones anteriores: {e}")
 
-        log.info(f"Registrado en silver_model_registry: {cfg.experiment.name}")
+    # 3. Insertar nueva versión como activa
+    try:
+        sb.table("silver_model_registry").insert({
+            "experiment_name": exp_name,
+            "version": new_version,
+            "is_active": True,
+            "model_name": cfg.model.name,
+            "task": cfg.experiment.task,
+            "interval": timeframe,
+            "train_start": cfg.data.train_start,
+            "train_end": cfg.data.train_end,
+            "test_start": cfg.data.test_start,
+            "test_end": cfg.data.test_end,
+            "file_path": str(file_path) if file_path else None,
+            "feature_columns": json.dumps(feature_names),
+            "feature_source": feature_source,
+            "timeframe": timeframe,
+            "scaler_params": json.dumps(scaler_params) if scaler_params else None,
+            "metrics_summary": json.dumps({"duration_s": duration_s}),
+        }).execute()
+
+        log.info(
+            f"Registrado en silver_model_registry: {exp_name} v{new_version} "
+            f"(v{current_max} desactivada)"
+        )
         log.info(f"  feature_source: {feature_source} | timeframe: {timeframe}")
-
-        # F-50: borrar fichero anterior SOLO DESPUÉS de que el upsert haya ido bien
-        if (
-            old_file_path
-            and old_file_path.exists()
-            and file_path
-            and old_file_path != file_path
-        ):
-            old_file_path.unlink()
-            log.info(f"  Modelo anterior eliminado: {old_file_path}")
 
     except Exception as e:
         log.error(f"Error registrando en silver_model_registry: {e}")

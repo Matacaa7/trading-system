@@ -197,11 +197,11 @@ def run_evaluate(
     if cfg.output.save_metrics:
         save_metrics(cfg, metrics)
 
-    # Actualizar metrics_summary en silver_model_registry
+    # Actualizar metrics_summary en la versión activa
     try:
         sb.table("silver_model_registry").update(
             {"metrics_summary": json.dumps(metrics)}
-        ).eq("experiment_name", cfg.experiment.name).execute()
+        ).eq("experiment_name", cfg.experiment.name).eq("is_active", True).execute()
     except Exception as e:
         log.warning(f"No se pudo actualizar metrics_summary: {e}")
 
