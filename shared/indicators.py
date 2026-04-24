@@ -17,8 +17,8 @@ Fórmulas usadas (las "canónicas" del silver.py original):
     - VWAP: reset diario (groupby por fecha)
     - Returns: log returns np.log(close/shift(1))
 
-TODO en Fase 3.4: implementar estas funciones y migrar
-silver.py y silver_rt.py para que las consuman.
+Implementado en Bloque 4. silver.py y silver_rt.py ya consumen
+estas funciones (paridad training/live resuelta).
 """
 
 from __future__ import annotations
@@ -118,7 +118,7 @@ def log_returns(close: pd.Series, period: int = 1) -> pd.Series:
     return np.log(close / close.shift(period))
 
 
-# TODO Fase 3.4:
-# - Añadir is_market_open con DST + festivos (resolverá F-76, F-77, F-92)
-# - Añadir sentiment_at_timestamp con ventana 15min (resolverá F-93)
-# - Tests unitarios comparando training vs live
+# Mejoras pendientes (no bloquean Bloque 4):
+# - F-76: is_market_open con DST (ver apps/ingestion_live/silver_rt.py)
+# - F-77: festivos US con exchange_calendars
+# - F-93: sentiment_at_timestamp con ventana 15min para live

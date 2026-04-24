@@ -1,7 +1,7 @@
 """
 reconciliation.py
 ─────────────────
-Módulo NUEVO — resuelve F-39 del informe de Fase 2.
+Módulo NUEVO — resuelve F-39 del informe.
 
 Consulta Alpaca periódicamente para detectar fills y cierres de bracket orders.
 Actualiza gold_trades con ts_salida, precio_salida, pnl, motivo_salida reales.
@@ -21,7 +21,7 @@ log = logging.getLogger(__name__)
 
 def reconcile_trades() -> int:
     """Revisa gold_trades con ts_salida IS NULL y actualiza con datos de Alpaca.
-    
+
     Returns:
         Número de trades actualizados.
     """
