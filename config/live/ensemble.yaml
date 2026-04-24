@@ -1,0 +1,42 @@
+# Configuración del ensemble LIVE
+# Este fichero define qué modelos usa el trading engine en producción.
+# NO es un yaml de backtest — los backtests van en config/backtests/
+#
+# Para cambiar el ensemble live, edita este fichero.
+# Para experimentar con pesos distintos, crea un backtest yaml y ejecútalo.
+
+data:
+  tickers:
+    - "AAPL"
+  timeframe: "1m"
+
+modelos:
+  - experiment_name: "aapl_xgboost_1m_v1"
+    activo: true
+    peso: 0.20
+  - experiment_name: "aapl_rf_1m_v1"
+    activo: true
+    peso: 0.20
+  - experiment_name: "aapl_lgbm_1m_v1"
+    activo: true
+    peso: 0.20
+  - experiment_name: "aapl_lstm_1m_v1"
+    activo: true
+    peso: 0.15
+  - experiment_name: "aapl_gru_1m_v1"
+    activo: true
+    peso: 0.15
+  - experiment_name: "aapl_transformer_1m_v1"
+    activo: true
+    peso: 0.10
+
+capital:
+  inicial: 100000
+  posicion_max_pct: 10
+  stop_loss_pct: 5
+  take_profit_pct: 10
+  cierre_fin_dia: true
+
+guardrails:
+  posicion_abierta:
+    activo: true

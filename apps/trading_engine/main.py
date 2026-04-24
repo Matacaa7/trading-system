@@ -42,15 +42,24 @@ log = logging.getLogger(__name__)
 
 
 def load_config() -> dict:
-    """Carga configuración mergeando trading.yaml con el backtest yaml referenciado."""
+    """Carga configuración mergeando trading.yaml con el ensemble yaml."""
     trading_yaml = app_cfg.config_dir / "live" / "trading.yaml"
     with open(trading_yaml, "r", encoding="utf-8") as f:
         trading_cfg = yaml.safe_load(f)
 
     # Cargar el yaml del ensemble activo
-    ensemble_path = app_cfg.repo_root / trading_cfg.get(
-        "active_ensemble_config", "config/backtests/aapl_backtest_v1.yaml"
+    ensemble_ref = trading_cfg.get(
+        "active_ensemble_config", "config/live/ensemble.yaml"
     )
+    ensemble_path = app_cfg.repo_root / ensemble_ref
+
+    # A-05: validar que no apunta a un backtest yaml
+    if "backtest" in str(ensemble_ref).lower():
+        log.warning(
+            f"active_ensemble_config apunta a un backtest ({ensemble_ref}). "
+            f"El live debería usar config/live/ensemble.yaml"
+        )
+
     with open(ensemble_path, "r", encoding="utf-8") as f:
         ensemble_cfg = yaml.safe_load(f)
 

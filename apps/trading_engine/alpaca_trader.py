@@ -137,24 +137,25 @@ def execute_order(
             log.warning(f"  {ticker}: precio inválido ({precio})")
             return None
 
-        # Calcular cantidad
+        # Calcular cantidad (F-36: fraccional, antes redondeaba a enteros)
         capital = estado.get("capital", cfg_capital["inicial"])
         posicion_max_pct = cfg_capital.get("posicion_max_pct", 10) / 100
         stop_loss_pct = cfg_capital.get("stop_loss_pct", 5) / 100
         take_profit_pct = cfg_capital.get("take_profit_pct", 10) / 100
 
-        qty = (capital * posicion_max_pct) / precio
-        qty = round(qty, 0)  # F-36: TODO considerar fraccional en Fase 4.5
+        qty = round((capital * posicion_max_pct) / precio, 4)
 
-        if qty < 1:
-            log.warning(f"  {ticker}: qty < 1 — orden omitida")
+        if qty < 0.01:
+            log.warning(f"  {ticker}: qty < 0.01 — orden omitida")
             return None
 
         stop_price = round(precio * (1 - stop_loss_pct), 2)
         take_price = round(precio * (1 + take_profit_pct), 2)
 
+        # F-37: SL/TP se calculan sobre ask_price (no fill).
+        # Reconciliation corregirá precio_entrada al fill real.
         log.info(
-            f"  {ticker}: BUY {qty} @ ~{precio} | SL {stop_price} | TP {take_price}"
+            f"  {ticker}: BUY {qty} @ ~{precio} | SL {stop_price} ({stop_loss_pct:.0%}) | TP {take_price} ({take_profit_pct:.0%})"
         )
 
         # Crear bracket order

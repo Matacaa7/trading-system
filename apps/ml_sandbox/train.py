@@ -140,12 +140,13 @@ def _register_model(
     except Exception as e:
         log.warning(f"Error desactivando versiones anteriores: {e}")
 
-    # 3. Insertar nueva versión como activa
+    # 3. Insertar nueva versión como activa, status='training' hasta que evaluate complete
     try:
         sb.table("silver_model_registry").insert({
             "experiment_name": exp_name,
             "version": new_version,
             "is_active": True,
+            "status": "training",
             "model_name": cfg.model.name,
             "task": cfg.experiment.task,
             "interval": timeframe,

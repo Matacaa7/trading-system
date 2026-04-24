@@ -1,10 +1,8 @@
 # Configuración del pipeline live
-# Migrar desde trading-engine/config/trading.yaml
 
 pipeline:
   interval_minutes: 1
   timeframe: "1m"
 
-# El yaml del ensemble vivo se referenciará aquí
-# (en lugar del path absoluto Windows del original — A-02 resuelto)
-active_ensemble_config: "config/backtests/aapl_backtest_v1.yaml"
+# Ensemble activo — DEBE apuntar a config/live/, NO a config/backtests/
+active_ensemble_config: "config/live/ensemble.yaml"

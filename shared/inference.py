@@ -62,12 +62,13 @@ def load_models(modelos_cfg: list[dict]) -> list[dict]:
                 )
                 .eq("experiment_name", exp_name)
                 .eq("is_active", True)
+                .eq("status", "complete")
                 .limit(1)
                 .execute()
             )
 
             if not resp.data:
-                log.warning(f"  {exp_name} no encontrado (o sin versión activa) — omitiendo")
+                log.warning(f"  {exp_name} no encontrado (o sin versión activa/complete) — omitiendo")
                 continue
 
             meta = resp.data[0]
