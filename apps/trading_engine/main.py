@@ -36,6 +36,7 @@ from shared.utils.logging import setup_logging
 
 from apps.trading_engine.alpaca_trader import execute_order, get_portfolio_state, get_orders_today
 from apps.trading_engine.db import save_signals, save_decision, save_log, save_timing
+from apps.trading_engine.reconciliation import reconcile_trades
 
 log = logging.getLogger(__name__)
 
@@ -199,6 +200,14 @@ def run(cfg: dict, modelos: list) -> None:
         f"Pipeline completado en {duration:.1f}s — "
         f"señales: {senales} | órdenes: {ordenes}"
     )
+
+    # Reconciliar trades abiertos con Alpaca (F-39)
+    try:
+        n_reconciled = reconcile_trades()
+        if n_reconciled:
+            log.info(f"Reconciliation: {n_reconciled} trades actualizados")
+    except Exception as e:
+        log.warning(f"Error en reconciliation: {e}")
 
 
 def main():

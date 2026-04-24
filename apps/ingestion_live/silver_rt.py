@@ -31,6 +31,8 @@ from shared.indicators import (
     atr,
     bollinger,
     ema,
+    enrich_sentiment,
+    is_market_open,
     log_returns,
     macd,
     rsi,
@@ -38,16 +40,6 @@ from shared.indicators import (
 )
 
 log = logging.getLogger(__name__)
-
-
-def _is_market_open(ts: pd.Series) -> pd.Series:
-    """Detecta si el timestamp está dentro del horario NYSE (13:30-20:00 UTC).
-
-    TODO F-76: añadir soporte DST (invierno es 14:30-21:00 UTC).
-    TODO F-77: considerar festivos US con exchange_calendars.
-    """
-    minutes_since_midnight = ts.dt.hour * 60 + ts.dt.minute
-    return ((minutes_since_midnight >= 810) & (minutes_since_midnight < 1200)).astype(int)
 
 
 def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
@@ -98,8 +90,8 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["hour"] = df["ts"].dt.hour
     df["dayofweek"] = df["ts"].dt.dayofweek
 
-    # Market open
-    df["is_market_open"] = _is_market_open(df["ts"])
+    # Market open (F-76: DST, F-77: festivos via exchange_calendars)
+    df["is_market_open"] = is_market_open(df["ts"])
 
     return df
 
@@ -146,11 +138,10 @@ def compute_silver_rt(
             # Calcular indicadores (ahora con shared.indicators)
             df = compute_indicators(df)
 
-            # Añadir sentiment
-            sent = (sentiment or {}).get(ticker, {})
-            df["sentiment_label"] = sent.get("label", "neutral")
-            df["sentiment_score"] = sent.get("score", 0.0)
-            df["sentiment_label_encoded"] = sent.get("encoded", 0)
+            # Añadir sentiment por barra (F-93: antes era constante para todas)
+            df = enrich_sentiment(df, ticker, news_table="silver_news_alpaca")
+            label_map = {"positive": 1, "neutral": 0, "negative": -1}
+            df["sentiment_label_encoded"] = df["sentiment_label"].map(label_map).fillna(0).astype(int)
 
             # Solo guardar las últimas 100 filas
             df = df.tail(100).copy()

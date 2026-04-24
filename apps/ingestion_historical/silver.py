@@ -25,7 +25,7 @@ import pandas as pd
 
 from shared.config import cfg
 from shared.db import sb
-from shared.indicators import atr, bollinger, ema, log_returns, macd, rsi, vwap
+from shared.indicators import atr, bollinger, ema, enrich_sentiment, is_market_open, log_returns, macd, rsi, vwap
 
 log = logging.getLogger(__name__)
 
@@ -117,9 +117,8 @@ def calc_features(df: pd.DataFrame, ticker: str) -> pd.DataFrame:
     out["hour"] = out.index.hour
     out["dayofweek"] = out.index.dayofweek
 
-    # Market open (13:30-20:00 UTC)
-    minutes = out.index.hour * 60 + out.index.minute
-    out["is_market_open"] = ((minutes >= 810) & (minutes < 1200)).astype(int)
+    # Market open (F-76: DST, F-77: festivos via exchange_calendars)
+    out["is_market_open"] = is_market_open(pd.Series(out.index, index=out.index))
 
     # Sentiment (por defecto None, se enriquece después)
     out["sentiment_label"] = None
@@ -129,50 +128,6 @@ def calc_features(df: pd.DataFrame, ticker: str) -> pd.DataFrame:
 
 
 # ── Enriquecimiento con sentiment ─────────────────────────────────────────────
-
-def enrich_with_sentiment(df: pd.DataFrame, ticker: str) -> pd.DataFrame:
-    """
-    Para cada vela, busca la noticia más reciente en los últimos 15 min
-    en silver_news_alpaca y añade su sentiment.
-    """
-    start = df.index.min().isoformat()
-    end = df.index.max().isoformat()
-
-    try:
-        resp = (
-            sb.table("silver_news_alpaca")
-            .select("published_at,sentiment_label,sentiment_score")
-            .eq("ticker", ticker)
-            .gte("published_at", start)
-            .lte("published_at", end)
-            .order("published_at")
-            .execute()
-        )
-        news_data = resp.data or []
-    except Exception as e:
-        log.warning(f"  {ticker}: error cargando sentiment: {e}")
-        return df
-
-    if not news_data:
-        return df
-
-    news_df = pd.DataFrame(news_data)
-    news_df["published_at"] = pd.to_datetime(news_df["published_at"], utc=True)
-    news_df = news_df.sort_values("published_at")
-
-    # Ventana de 15 min hacia atrás por cada vela
-    for ts in df.index:
-        window = news_df[
-            (news_df["published_at"] >= ts - pd.Timedelta(minutes=15))
-            & (news_df["published_at"] <= ts)
-        ]
-        if not window.empty:
-            latest = window.iloc[-1]
-            df.at[ts, "sentiment_label"] = latest["sentiment_label"]
-            df.at[ts, "sentiment_score"] = latest["sentiment_score"]
-
-    return df
-
 
 # ── Guardado en silver ────────────────────────────────────────────────────────
 
@@ -248,7 +203,7 @@ def run_silver(
 
             if enrich_news:
                 log.info(f"  [{interval}] Enriqueciendo con sentiment...")
-                df = enrich_with_sentiment(df, ticker)
+                df = enrich_sentiment(df, ticker)
 
             # Solo guardar los USEFUL_DAYS más recientes (descartar warm-up)
             df = df[df.index >= cutoff]

@@ -118,7 +118,130 @@ def log_returns(close: pd.Series, period: int = 1) -> pd.Series:
     return np.log(close / close.shift(period))
 
 
-# Mejoras pendientes (no bloquean Bloque 4):
-# - F-76: is_market_open con DST (ver apps/ingestion_live/silver_rt.py)
-# - F-77: festivos US con exchange_calendars
-# - F-93: sentiment_at_timestamp con ventana 15min para live
+# Mejoras pendientes:
+# - F-93 ideal: per-bar FinBERT en RT (requiere refactor de finbert_rt pipeline)
+
+
+def is_market_open(ts_series: pd.Series) -> pd.Series:
+    """Detecta si cada timestamp cae dentro del horario NYSE.
+
+    Usa exchange_calendars para manejar DST (F-76) y festivos US (F-77).
+    Retorna 1 si abierto, 0 si cerrado.
+
+    Args:
+        ts_series: Series de timestamps UTC (datetime64[ns, UTC])
+    """
+    import exchange_calendars as xcals
+
+    nyse = xcals.get_calendar("XNYS")
+
+    # Rango de fechas a consultar
+    dates = pd.to_datetime(ts_series).dt.date.unique()
+    start = pd.Timestamp(min(dates))
+    end = pd.Timestamp(max(dates)) + pd.Timedelta(days=1)
+
+    # Obtener sesiones y horarios
+    schedule = nyse.sessions_in_range(start, end)
+    schedule_set = set(schedule.date)
+
+    result = pd.Series(0, index=ts_series.index, dtype=int)
+
+    for date in dates:
+        if date not in schedule_set:
+            # Festivo o fin de semana → cerrado
+            continue
+
+        session = pd.Timestamp(date, tz="UTC")
+        try:
+            market_open = nyse.session_open(session)
+            market_close = nyse.session_close(session)
+        except Exception:
+            continue
+
+        mask = (
+            (pd.to_datetime(ts_series).dt.date == date)
+            & (pd.to_datetime(ts_series) >= market_open)
+            & (pd.to_datetime(ts_series) < market_close)
+        )
+        result[mask] = 1
+
+    return result
+
+
+def enrich_sentiment(
+    df: pd.DataFrame,
+    ticker: str,
+    news_table: str = "silver_news_alpaca",
+    window_minutes: int = 15,
+) -> pd.DataFrame:
+    """Asigna sentiment por barra usando ventana temporal (F-93).
+
+    Para cada vela, busca la noticia más reciente en los últimos
+    `window_minutes` minutos y asigna su sentiment.
+
+    Resuelve F-93: antes silver_rt.py propagaba el mismo sentiment
+    a todas las barras, eliminando la señal temporal para LSTM/GRU/Transformer.
+
+    Args:
+        df:             DataFrame con índice datetime UTC
+        ticker:         ticker a consultar
+        news_table:     tabla de noticias con sentiment (silver_news_alpaca)
+        window_minutes: ventana de búsqueda hacia atrás en minutos
+
+    Returns:
+        DataFrame con sentiment_label y sentiment_score por barra
+    """
+    from shared.db import sb
+
+    df = df.copy()
+    df["sentiment_label"] = None
+    df["sentiment_score"] = None
+
+    # Determinar rango temporal
+    if hasattr(df.index, "min"):
+        ts_min, ts_max = df.index.min(), df.index.max()
+    elif "ts" in df.columns:
+        ts_min = pd.to_datetime(df["ts"]).min()
+        ts_max = pd.to_datetime(df["ts"]).max()
+    else:
+        return df
+
+    try:
+        resp = (
+            sb.table(news_table)
+            .select("published_at,sentiment_label,sentiment_score")
+            .eq("ticker", ticker)
+            .gte("published_at", (ts_min - pd.Timedelta(minutes=window_minutes)).isoformat())
+            .lte("published_at", ts_max.isoformat())
+            .order("published_at")
+            .execute()
+        )
+        news_data = resp.data or []
+    except Exception:
+        return df
+
+    if not news_data:
+        return df
+
+    news_df = pd.DataFrame(news_data)
+    news_df["published_at"] = pd.to_datetime(news_df["published_at"], utc=True)
+    news_df = news_df.sort_values("published_at")
+
+    # Asignar por ventana temporal
+    timestamps = df.index if hasattr(df.index, "hour") else pd.to_datetime(df["ts"])
+
+    for i, ts in enumerate(timestamps):
+        window = news_df[
+            (news_df["published_at"] >= ts - pd.Timedelta(minutes=window_minutes))
+            & (news_df["published_at"] <= ts)
+        ]
+        if not window.empty:
+            latest = window.iloc[-1]
+            if hasattr(df.index, "hour"):
+                df.at[ts, "sentiment_label"] = latest["sentiment_label"]
+                df.at[ts, "sentiment_score"] = latest["sentiment_score"]
+            else:
+                df.iloc[i, df.columns.get_loc("sentiment_label")] = latest["sentiment_label"]
+                df.iloc[i, df.columns.get_loc("sentiment_score")] = latest["sentiment_score"]
+
+    return df
