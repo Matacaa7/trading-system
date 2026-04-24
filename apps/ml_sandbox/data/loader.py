@@ -23,8 +23,16 @@ log = logging.getLogger(__name__)
 
 
 def load_data(cfg: ExperimentConfig) -> pd.DataFrame:
-    """Carga datos según el tipo de modelo definido en el yaml."""
-    if cfg.is_sklearn:
+    """Carga datos según el tipo de modelo y data.source del yaml."""
+    use_silver = cfg.data.source == "silver" or cfg.is_sklearn
+    if not use_silver and cfg.is_pytorch:
+        # Auto: intentar tensores, fallback a silver
+        tensor_path = cfg.tensors_dir / cfg.data.tensor_interval / f"tensor_{cfg.data.tensor_type}.npy"
+        use_silver = not tensor_path.exists()
+        if use_silver:
+            log.info("Tensores no encontrados, cargando desde silver tables")
+
+    if use_silver:
         return _load_from_silver(cfg)
     else:
         return _load_from_tensor(cfg)

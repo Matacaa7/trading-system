@@ -75,6 +75,7 @@ class ExperimentConfig:
             tensor_interval=data.get("tensor_interval", "1m"),
             tensor_type=data.get("tensor_type", "features"),
             sequence_length=data.get("sequence_length", 10),
+            source=data.get("source", "auto"),  # "silver", "tensor", or "auto"
         )
 
         # ── Output ─────────────────────────────────────────────

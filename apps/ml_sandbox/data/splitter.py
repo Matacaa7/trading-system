@@ -58,8 +58,8 @@ def split_data(
     log.info(f"Train: {len(train_df)} filas ({cfg.data.train_start} -> {cfg.data.test_start})")
     log.info(f"Test:  {len(test_df)} filas ({cfg.data.test_start} -> {cfg.data.test_end})")
 
-    # Features
-    if cfg.is_sklearn:
+    # Features — usar columns del yaml si están especificadas
+    if cfg.data.columns:
         feature_cols = cfg.data.columns
     else:
         exclude = {"ts", "ticker", cfg.data.target}
@@ -68,8 +68,8 @@ def split_data(
     X_train = train_df[feature_cols].values.astype(np.float32)
     X_test = test_df[feature_cols].values.astype(np.float32)
 
-    # Target — pytorch necesita recarga desde Supabase por ticker
-    if cfg.is_pytorch:
+    # Target — si cargamos desde silver, target ya está en el df
+    if cfg.is_pytorch and cfg.data.source != "silver":
         table = cfg.data.tables[0] if cfg.data.tables else "silver_features_1m"
         resp = (
             sb.table(table)

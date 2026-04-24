@@ -52,7 +52,7 @@ def save_decision(decision: dict, detalle: dict) -> None:
         }
         sb.table("gold_decisions").upsert(row, on_conflict="ts,ticker").execute()
         log.info(
-            f"  Decisión guardada: {decision['ticker']} → "
+            f"  Decisión guardada: {decision['ticker']} -> "
             f"{decision['decision']} ({decision['score_final']:.1f})"
         )
     except Exception as e:
