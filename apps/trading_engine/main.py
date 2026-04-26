@@ -41,6 +41,20 @@ from apps.trading_engine.reconciliation import reconcile_trades
 log = logging.getLogger(__name__)
 
 
+def _is_trading_enabled() -> bool:
+    """Lee config.trading_enabled de Supabase.
+    Controla si las órdenes se ejecutan (botón 'Invertir' del frontend).
+    Si la tabla no existe o hay error, retorna False (fail-safe).
+    """
+    try:
+        from shared.db import sb
+        resp = sb.table("config").select("trading_enabled").eq("id", 1).single().execute()
+        return bool(resp.data.get("trading_enabled", False)) if resp.data else False
+    except Exception as e:
+        log.warning(f"No se pudo leer config.trading_enabled: {e}. Asumiendo False (no operar).")
+        return False
+
+
 def load_config() -> dict:
     """Carga configuración mergeando trading.yaml con el ensemble yaml."""
     trading_yaml = app_cfg.config_dir / "live" / "trading.yaml"
@@ -219,17 +233,28 @@ def run(cfg: dict, modelos: list) -> None:
 
                 # Ejecutar orden si procede
                 if decision["decision"] == "BUY":
-                    t0 = time.time()
-                    trade = execute_order(ticker, decision, cfg_capital, portfolio)
-                    save_timing(
-                        "execute_order", time.time() - t0, run_id=run_id, ticker=ticker
-                    )
-
-                    if trade:
-                        ordenes += 1
-                        ordenes_hoy += 1
-                        decision["ejecutada"] = True
+                    # Verificar si trading está habilitado (botón invertir del frontend)
+                    trading_enabled = _is_trading_enabled()
+                    if not trading_enabled:
+                        log.info(
+                            f"  {ticker}: BUY con score {score:.1f} pero trading desactivado "
+                            f"(config.trading_enabled=false). Señal registrada, orden NO enviada."
+                        )
+                        decision["ejecutada"] = False
+                        decision["motivo_rechazo"] = "trading_desactivado"
                         save_decision(decision, detalle)
+                    else:
+                        t0 = time.time()
+                        trade = execute_order(ticker, decision, cfg_capital, portfolio)
+                        save_timing(
+                            "execute_order", time.time() - t0, run_id=run_id, ticker=ticker
+                        )
+
+                        if trade:
+                            ordenes += 1
+                            ordenes_hoy += 1
+                            decision["ejecutada"] = True
+                            save_decision(decision, detalle)
 
             except Exception as e:
                 msg = f"Error procesando {ticker}: {e}"
