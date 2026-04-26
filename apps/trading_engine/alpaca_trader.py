@@ -44,6 +44,13 @@ def _get_trading_client() -> TradingClient:
     )
 
 
+@lru_cache(maxsize=1)
+def _get_data_client():
+    """N-04: Cliente de datos Alpaca singleton."""
+    from alpaca.data.historical import StockHistoricalDataClient
+    return StockHistoricalDataClient(cfg.alpaca_api_key, cfg.alpaca_secret_key)
+
+
 def get_portfolio_state() -> dict:
     """
     Obtiene el estado actual del portfolio en Alpaca.
@@ -74,12 +81,16 @@ def get_portfolio_state() -> dict:
         }
 
     except Exception as e:
-        log.error(f"Error obteniendo estado del portfolio: {e}")
+        log.error(
+            f"Error obteniendo estado del portfolio: {e}. "
+            f"El bot NO operará hasta que se resuelva este error."
+        )
         return {
             "capital": 0,
             "posiciones": {},
             "n_posiciones": 0,
             "portfolio_value": 0,
+            "error": True,  # F-34: flag para que el caller sepa que falló
         }
 
 
@@ -122,13 +133,10 @@ def execute_order(
     try:
         client = _get_trading_client()
 
-        # Obtener precio actual
-        from alpaca.data.historical import StockHistoricalDataClient
+        # Obtener precio actual (N-04: usa singleton)
         from alpaca.data.requests import StockLatestQuoteRequest
 
-        data_client = StockHistoricalDataClient(
-            cfg.alpaca_api_key, cfg.alpaca_secret_key
-        )
+        data_client = _get_data_client()
         quote_req = StockLatestQuoteRequest(symbol_or_symbols=[ticker])
         quote = data_client.get_stock_latest_quote(quote_req)
         precio = float(quote[ticker].ask_price)
@@ -200,10 +208,43 @@ def execute_order(
 
 
 def close_all() -> None:
-    """Cierra todas las posiciones abiertas — función de emergencia."""
+    """Cierra todas las posiciones abiertas — función de emergencia.
+    F-40: ahora actualiza gold_trades para cada posición cerrada.
+    I-03: incluye precio_salida y P&L calculado desde datos de la posición.
+    """
     try:
         client = _get_trading_client()
+
+        # Leer posiciones antes de cerrar para poder actualizar gold_trades
+        positions = client.get_all_positions()
+        position_data = {
+            p.symbol: {
+                "current_price": float(p.current_price) if p.current_price else 0,
+                "avg_entry_price": float(p.avg_entry_price) if p.avg_entry_price else 0,
+                "qty": float(p.qty) if p.qty else 0,
+                "unrealized_pl": float(p.unrealized_pl) if p.unrealized_pl else 0,
+                "unrealized_plpc": float(p.unrealized_plpc) * 100 if p.unrealized_plpc else 0,
+            }
+            for p in positions
+        }
+        tickers_cerrados = list(position_data.keys())
+
         client.close_all_positions(cancel_orders=True)
-        log.info("Todas las posiciones cerradas")
+        log.info(f"Todas las posiciones cerradas: {tickers_cerrados}")
+
+        # F-40 + I-03: actualizar gold_trades con P&L real
+        for ticker, pos in position_data.items():
+            try:
+                sb.table("gold_trades").update({
+                    "ts_salida": utc_isoformat(),
+                    "precio_salida": pos["current_price"],
+                    "pnl": round(pos["unrealized_pl"], 2),
+                    "pnl_pct": round(pos["unrealized_plpc"], 2),
+                    "motivo_salida": "close_all_emergencia",
+                    "status": "closed",
+                }).eq("ticker", ticker).is_("ts_salida", "null").execute()
+            except Exception as e:
+                log.warning(f"  Error actualizando gold_trades para {ticker}: {e}")
+
     except Exception as e:
         log.error(f"Error cerrando posiciones: {e}")

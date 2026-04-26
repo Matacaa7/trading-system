@@ -20,24 +20,14 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 
-from alpaca.trading.client import TradingClient
-
-from shared.config import cfg
 from shared.db import sb
 from shared.utils.time import utc_isoformat
+from apps.trading_engine.alpaca_trader import _get_trading_client
 
 log = logging.getLogger(__name__)
 
 # Status de Alpaca que indican cierre
 _CLOSED_STATUSES = {"filled", "canceled", "expired", "done_for_day", "replaced"}
-
-
-def _get_trading_client() -> TradingClient:
-    return TradingClient(
-        api_key=cfg.alpaca_api_key,
-        secret_key=cfg.alpaca_secret_key,
-        paper=cfg.alpaca_paper,
-    )
 
 
 def _get_open_trades() -> list[dict]:

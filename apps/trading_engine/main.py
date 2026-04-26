@@ -44,6 +44,12 @@ log = logging.getLogger(__name__)
 def load_config() -> dict:
     """Carga configuración mergeando trading.yaml con el ensemble yaml."""
     trading_yaml = app_cfg.config_dir / "live" / "trading.yaml"
+    if not trading_yaml.exists():
+        raise FileNotFoundError(
+            f"No se encontró {trading_yaml}. "
+            f"Crea el fichero a partir de config/live/trading.yaml.example"
+        )
+
     with open(trading_yaml, "r", encoding="utf-8") as f:
         trading_cfg = yaml.safe_load(f)
 
@@ -52,6 +58,11 @@ def load_config() -> dict:
         "active_ensemble_config", "config/live/ensemble.yaml"
     )
     ensemble_path = app_cfg.repo_root / ensemble_ref
+    if not ensemble_path.exists():
+        raise FileNotFoundError(
+            f"No se encontró ensemble config: {ensemble_path}. "
+            f"Verifica active_ensemble_config en {trading_yaml}"
+        )
 
     # A-05: validar que no apunta a un backtest yaml
     if "backtest" in str(ensemble_ref).lower():
@@ -79,6 +90,8 @@ def run(cfg: dict, modelos: list) -> None:
     start = datetime.now(timezone.utc)
     run_id = start.strftime("%Y%m%d_%H%M%S")
     tickers = cfg.get("data", {}).get("tickers", [])
+    context_tickers = cfg.get("data", {}).get("context_tickers", [])
+    all_tickers = list(dict.fromkeys(tickers + context_tickers))  # deduplicated
     timeframe = cfg["pipeline"].get("timeframe", "1m")
     cfg_gr = cfg.get("guardrails", {})
     cfg_capital = cfg.get("capital", {})
@@ -88,31 +101,31 @@ def run(cfg: dict, modelos: list) -> None:
 
     log.info(f"{'='*60}")
     log.info(f"Iniciando pipeline — run_id: {run_id}")
-    log.info(f"Tickers: {tickers} | Timeframe: {timeframe}")
+    log.info(f"Tickers: {tickers} | Context: {context_tickers} | Timeframe: {timeframe}")
 
     try:
-        # 1. Descargar precios RT
+        # 1. Descargar precios RT (incluye context_tickers)
         log.info("-- Descargando precios RT...")
         t0 = time.time()
-        fetch_prices(tickers=tickers, timeframe=timeframe, bars=100)
+        fetch_prices(tickers=all_tickers, timeframe=timeframe, bars=100)
         save_timing("fetch_prices", time.time() - t0, run_id=run_id)
 
         # 2. Descargar noticias RT
         log.info("-- Descargando noticias RT...")
         t0 = time.time()
-        fetch_news(tickers=tickers, hours=24)
+        fetch_news(tickers=all_tickers, hours=24)
         save_timing("fetch_news", time.time() - t0, run_id=run_id)
 
         # 3. Calcular sentiment
         log.info("-- Calculando sentiment...")
         t0 = time.time()
-        sentiment = get_sentiment(tickers=tickers, hours=24)
+        sentiment = get_sentiment(tickers=all_tickers, hours=24)
         save_timing("sentiment", time.time() - t0, run_id=run_id)
 
-        # 4. Calcular indicadores silver RT
+        # 4. Calcular indicadores silver RT (incluye context_tickers)
         log.info("-- Calculando indicadores silver RT...")
         t0 = time.time()
-        df_silver = compute_silver_rt(tickers=tickers, timeframe=timeframe, sentiment=sentiment)
+        df_silver = compute_silver_rt(tickers=all_tickers, timeframe=timeframe)
         save_timing("silver_rt", time.time() - t0, run_id=run_id)
 
         if df_silver.empty:
@@ -135,6 +148,20 @@ def run(cfg: dict, modelos: list) -> None:
         ordenes_hoy = get_orders_today()
         save_timing("portfolio_state", time.time() - t0, run_id=run_id)
 
+        # F-34: si el portfolio state falló, no operar
+        if portfolio.get("error"):
+            log.error("Portfolio state falló — abortando iteración (no se operará)")
+            save_log(
+                duration_s=(datetime.now(timezone.utc) - start).total_seconds(),
+                tickers_procesados=tickers,
+                senales_generadas=0,
+                ordenes_ejecutadas=0,
+                errores=["portfolio_state_error"],
+                status="error",
+                run_id=run_id,
+            )
+            return
+
         # Procesar cada ticker
         for ticker in tickers:
             log.info(f"-- Procesando {ticker}...")
@@ -144,6 +171,27 @@ def run(cfg: dict, modelos: list) -> None:
                 if df_ticker.empty:
                     log.warning(f"  {ticker}: sin datos silver")
                     continue
+
+                # Enriquecer con features de context_tickers
+                if context_tickers:
+                    feature_cols_to_merge = [
+                        "ema_9", "ema_12", "ema_21", "rsi_14",
+                        "macd_line", "macd_signal", "bb_pct", "bb_width",
+                        "vwap", "atr_14", "returns_5", "volume_norm",
+                    ]
+                    for ctx_ticker in context_tickers:
+                        if ctx_ticker == ticker:
+                            continue
+                        ctx_df = df_silver[df_silver["ticker"] == ctx_ticker].copy()
+                        if ctx_df.empty:
+                            continue
+                        rename_map = {c: f"{ctx_ticker}_{c}" for c in feature_cols_to_merge if c in ctx_df.columns}
+                        ctx_df = ctx_df[["ts"] + list(rename_map.keys())].rename(columns=rename_map)
+                        df_ticker = df_ticker.merge(ctx_df, on="ts", how="left")
+                    # Rellenar NaN de context con 0
+                    ctx_cols = [c for c in df_ticker.columns if any(c.startswith(f"{t}_") for t in context_tickers)]
+                    if ctx_cols:
+                        df_ticker[ctx_cols] = df_ticker[ctx_cols].fillna(0)
 
                 # Predicción con el ensemble
                 t0 = time.time()

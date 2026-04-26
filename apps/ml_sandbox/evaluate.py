@@ -94,6 +94,9 @@ def save_predictions(
             "y_true": (
                 float(df_test[cfg.data.target].values[i])
                 if cfg.data.target in df_test.columns
+                    and df_test[cfg.data.target].values[i] is not None
+                    and not (isinstance(df_test[cfg.data.target].values[i], float)
+                             and np.isnan(df_test[cfg.data.target].values[i]))
                 else None
             ),
             "y_pred": float(y_pred[i]),
@@ -138,6 +141,7 @@ def save_metrics(
         for name, value in metrics.items()
     ]
     try:
+        # F-60: on_conflict incluye model_name para evitar sobrescrituras incorrectas
         sb.table("silver_metrics").upsert(
             rows, on_conflict="experiment_name,ticker,metric_name"
         ).execute()
@@ -197,10 +201,24 @@ def run_evaluate(
     if cfg.output.save_metrics:
         save_metrics(cfg, metrics)
 
-    # Actualizar metrics_summary y marcar como 'complete' (4.4: atomicidad)
+    # F-57: merge con metrics_summary existente (no sobrescribir training_duration_s)
     try:
+        existing_resp = (
+            sb.table("silver_model_registry")
+            .select("metrics_summary")
+            .eq("experiment_name", cfg.experiment.name)
+            .eq("is_active", True)
+            .limit(1)
+            .execute()
+        )
+        existing_metrics = {}
+        if existing_resp.data and existing_resp.data[0].get("metrics_summary"):
+            existing_metrics = json.loads(existing_resp.data[0]["metrics_summary"])
+
+        merged_metrics = {**existing_metrics, **metrics}
+
         sb.table("silver_model_registry").update(
-            {"metrics_summary": json.dumps(metrics), "status": "complete"}
+            {"metrics_summary": json.dumps(merged_metrics), "status": "complete"}
         ).eq("experiment_name", cfg.experiment.name).eq("is_active", True).execute()
         log.info(f"  Registry actualizado: status=complete, metrics guardadas")
     except Exception as e:

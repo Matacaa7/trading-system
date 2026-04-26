@@ -62,6 +62,7 @@ class ExperimentConfig:
         data = raw.get("data", {})
         self.data = SimpleNamespace(
             tickers=data.get("tickers", []),
+            context_tickers=data.get("context_tickers", []),
             columns=data.get("columns", []),
             target=data.get("target", "target"),
             target_threshold=data.get("target_threshold", 0),

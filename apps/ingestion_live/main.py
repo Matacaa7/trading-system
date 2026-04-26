@@ -58,10 +58,10 @@ def main():
         sentiment = get_sentiment(tickers=args.tickers, hours=24)
         log.info(f"  Sentiment: {time.time() - t0:.1f}s")
 
-    # 4. Silver
+    # 4. Silver (N-10: sentiment se consulta internamente via enrich_sentiment)
     log.info("Calculando indicadores silver RT...")
     t0 = time.time()
-    df = compute_silver_rt(tickers=args.tickers, timeframe=args.timeframe, sentiment=sentiment)
+    df = compute_silver_rt(tickers=args.tickers, timeframe=args.timeframe)
     log.info(f"  Silver: {time.time() - t0:.1f}s")
 
     if df.empty:

@@ -35,8 +35,7 @@ def ema(series: pd.Series, period: int) -> pd.Series:
 def rsi(close: pd.Series, period: int = 14) -> pd.Series:
     """RSI Wilder (EMA-based). Estándar de la literatura técnica.
     
-    IMPORTANTE: silver_rt.py actual usa SMA en lugar de EMA aquí.
-    Esta es la versión canónica.
+    Tanto silver.py como silver_rt.py usan esta función (paridad resuelta).
     """
     delta = close.diff()
     gain = delta.clip(lower=0)
@@ -73,13 +72,16 @@ def bollinger(
 def vwap(df: pd.DataFrame) -> pd.Series:
     """VWAP con reset diario (groupby por fecha).
     
-    IMPORTANTE: silver_rt.py actual usa cumsum() sin reset.
-    Esta es la versión canónica (reset diario cada sesión).
-    
-    df debe tener columnas: high, low, close, volume, y un índice datetime.
+    Tanto silver.py como silver_rt.py usan esta función (paridad resuelta).
+    df debe tener columnas: high, low, close, volume, y un índice datetime o columna 'ts'.
     """
     df = df.copy()
-    df["_date"] = df.index.date if hasattr(df.index, "date") else pd.to_datetime(df["ts"]).dt.date
+    if isinstance(df.index, pd.DatetimeIndex):
+        df["_date"] = df.index.date
+    elif "ts" in df.columns:
+        df["_date"] = pd.to_datetime(df["ts"]).dt.date
+    else:
+        raise ValueError("vwap() requiere índice DatetimeIndex o columna 'ts'")
     df["_tp"] = (df["high"] + df["low"] + df["close"]) / 3
     df["_tpvol"] = df["_tp"] * df["volume"]
     cum_tpvol = df.groupby("_date")["_tpvol"].cumsum()
@@ -90,9 +92,7 @@ def vwap(df: pd.DataFrame) -> pd.Series:
 def atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
     """Average True Range Wilder (EMA-based).
     
-    IMPORTANTE: silver_rt.py actual usa SMA en lugar de EMA.
-    Esta es la versión canónica.
-    
+    Tanto silver.py como silver_rt.py usan esta función (paridad resuelta).
     df debe tener columnas: high, low, close.
     """
     high = df["high"]
@@ -112,8 +112,7 @@ def atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
 def log_returns(close: pd.Series, period: int = 1) -> pd.Series:
     """Log returns. np.log(close / shift(period)).
     
-    IMPORTANTE: silver_rt.py actual usa pct_change() (simple returns).
-    Esta es la versión canónica (log returns).
+    Tanto silver.py como silver_rt.py usan esta función (paridad resuelta).
     """
     return np.log(close / close.shift(period))
 
@@ -227,21 +226,23 @@ def enrich_sentiment(
     news_df["published_at"] = pd.to_datetime(news_df["published_at"], utc=True)
     news_df = news_df.sort_values("published_at")
 
-    # Asignar por ventana temporal
-    timestamps = df.index if hasattr(df.index, "hour") else pd.to_datetime(df["ts"])
+    # F-96: merge_asof vectorizado en vez de loop O(n×m)
+    timestamps = df.index if isinstance(df.index, pd.DatetimeIndex) else pd.to_datetime(df["ts"])
+    bar_df = pd.DataFrame({"_bar_ts": timestamps}).reset_index(drop=True)
+    bar_df["_bar_ts"] = pd.to_datetime(bar_df["_bar_ts"], utc=True)
+    bar_df = bar_df.sort_values("_bar_ts")
 
-    for i, ts in enumerate(timestamps):
-        window = news_df[
-            (news_df["published_at"] >= ts - pd.Timedelta(minutes=window_minutes))
-            & (news_df["published_at"] <= ts)
-        ]
-        if not window.empty:
-            latest = window.iloc[-1]
-            if hasattr(df.index, "hour"):
-                df.at[ts, "sentiment_label"] = latest["sentiment_label"]
-                df.at[ts, "sentiment_score"] = latest["sentiment_score"]
-            else:
-                df.iloc[i, df.columns.get_loc("sentiment_label")] = latest["sentiment_label"]
-                df.iloc[i, df.columns.get_loc("sentiment_score")] = latest["sentiment_score"]
+    merged = pd.merge_asof(
+        bar_df,
+        news_df[["published_at", "sentiment_label", "sentiment_score"]].rename(
+            columns={"published_at": "_bar_ts"}
+        ),
+        on="_bar_ts",
+        direction="backward",
+        tolerance=pd.Timedelta(minutes=window_minutes),
+    )
+
+    df["sentiment_label"] = merged["sentiment_label"].values
+    df["sentiment_score"] = merged["sentiment_score"].values
 
     return df

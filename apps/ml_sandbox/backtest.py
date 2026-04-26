@@ -43,8 +43,11 @@ def load_backtest_config(path: str) -> dict:
 # ── Carga de datos silver ─────────────────────────────────────────────────────
 
 def load_silver(cfg: dict) -> pd.DataFrame:
-    """Carga silver_features del periodo de test para todos los tickers."""
+    """Carga silver_features del periodo de test para todos los tickers.
+    Si context_tickers está definido, carga y une sus features con prefijo.
+    """
     tickers = cfg["data"]["tickers"]
+    context_tickers = cfg["data"].get("context_tickers", [])
     timeframe = cfg["data"].get("timeframe", "1m")
     table = f"silver_features_{timeframe}"
     start = cfg["data"]["test_start"]
@@ -80,7 +83,62 @@ def load_silver(cfg: dict) -> pd.DataFrame:
     if not all_dfs:
         raise ValueError("No se encontraron datos silver para el periodo de test")
 
-    return pd.concat(all_dfs).sort_values(["ts", "ticker"]).reset_index(drop=True)
+    result = pd.concat(all_dfs).sort_values(["ts", "ticker"]).reset_index(drop=True)
+
+    # Context tickers: cargar features y unir por timestamp
+    if context_tickers:
+        log.info(f"  Cargando context_tickers: {context_tickers}")
+        # Columnas de features a usar como contexto
+        ctx_feature_cols = [
+            "ema_9", "ema_12", "ema_21", "rsi_14",
+            "macd_line", "macd_signal", "bb_pct", "bb_width",
+            "vwap", "atr_14", "returns_5", "volume_norm",
+        ]
+        ctx_select = ",".join(["ts", "ticker"] + ctx_feature_cols)
+
+        for ctx_ticker in context_tickers:
+            rows: list[dict] = []
+            offset = 0
+            while True:
+                resp = (
+                    sb.table(table)
+                    .select(ctx_select)
+                    .eq("ticker", ctx_ticker)
+                    .gte("ts", start)
+                    .lt("ts", str(pd.Timestamp(end) + pd.Timedelta(days=1)))
+                    .order("ts")
+                    .range(offset, offset + 999)
+                    .execute()
+                )
+                batch = resp.data or []
+                rows.extend(batch)
+                if len(batch) < 1000:
+                    break
+                offset += 1000
+
+            if not rows:
+                log.warning(f"  context {ctx_ticker}: sin datos — omitiendo")
+                continue
+
+            ctx_df = pd.DataFrame(rows)
+            ctx_df["ts"] = pd.to_datetime(ctx_df["ts"], utc=True)
+            log.info(f"  context {ctx_ticker}: {len(ctx_df)} filas")
+
+            # Renombrar con prefijo
+            rename_map = {c: f"{ctx_ticker}_{c}" for c in ctx_feature_cols if c in ctx_df.columns}
+            ctx_df = ctx_df.rename(columns=rename_map)
+            ctx_df = ctx_df.drop(columns=["ticker"], errors="ignore")
+
+            # Merge por timestamp
+            result = result.merge(ctx_df, on="ts", how="left")
+
+        # Rellenar NaN de context con 0
+        ctx_cols = [c for c in result.columns if any(c.startswith(f"{t}_") for t in context_tickers)]
+        if ctx_cols:
+            result[ctx_cols] = result[ctx_cols].fillna(0)
+            log.info(f"  Context features: {len(ctx_cols)} columnas añadidas")
+
+    return result
 
 
 # ── Motor de backtest ─────────────────────────────────────────────────────────
@@ -126,6 +184,7 @@ def run_backtest_ticker(
                 pnl = (precio_salida - posicion["precio_entrada"]) * posicion["qty"]
                 pnl_pct = (precio_salida / posicion["precio_entrada"] - 1) * 100
                 capital += posicion["qty"] * precio_salida
+                capital_max = max(capital_max, capital)  # N-11: también en cierre fin de día
                 trades.append({
                     "ticker": ticker,
                     "ts_entrada": posicion["ts_entrada"].isoformat(),
@@ -197,6 +256,9 @@ def run_backtest_ticker(
         df_hist_actual = df_ticker[df_ticker["ts"] <= ts].tail(10)
         score, detalle, _ = predict_ensemble(row, modelos, df_hist=df_hist_actual)
 
+        # F-21: score threshold configurable desde yaml
+        score_threshold = cfg_gr.get("score_threshold", 50)
+
         estado = {
             "posicion_abierta": posicion is not None,
             "n_posiciones": 1 if posicion else 0,
@@ -223,8 +285,8 @@ def run_backtest_ticker(
             })
             continue
 
-        # Abrir posición si score >= 50
-        if score >= 50:
+        # Abrir posición si score >= threshold (F-21: configurable)
+        if score >= score_threshold:
             qty = (capital * posicion_max_pct) / close
             coste = qty * close
             capital -= coste
@@ -278,7 +340,12 @@ def run_backtest_ticker(
     retornos = [t["pnl_pct"] / 100 for t in trades_cerrados if t["pnl"] != 0]
     sharpe = 0.0
     if retornos and np.std(retornos) > 0:
-        sharpe = round(np.mean(retornos) / np.std(retornos) * np.sqrt(252), 2)
+        # F-01: anualización correcta para intraday.
+        # n_trades / n_trading_days = trades por día. Anualizamos con sqrt(252 * trades_por_día).
+        n_days = max(1, len(set(t.get("ts_entrada", "")[:10] for t in trades_cerrados)))
+        trades_per_day = len(retornos) / n_days if n_days > 0 else 1
+        annualization_factor = np.sqrt(252 * trades_per_day)
+        sharpe = round(np.mean(retornos) / np.std(retornos) * annualization_factor, 2)
 
     stats = {
         "capital_inicial": cfg_capital["inicial"],
@@ -300,28 +367,16 @@ def run_backtest_ticker(
 # ── Guardado en Supabase ──────────────────────────────────────────────────────
 
 def save_results(cfg: dict, trades: list[dict], stats: dict) -> None:
-    """Guarda resultados en Supabase sobreescribiendo si ya existe."""
+    """Guarda resultados en Supabase.
+    F-03: primero inserta en tabla temporal, luego borra los viejos.
+    F-04: tracking de batches fallidos.
+    """
     name = cfg["backtest"]["name"]
 
-    sb.table("backtest_trades").delete().eq("backtest_name", name).execute()
-    sb.table("backtest_metrics").delete().eq("backtest_name", name).execute()
-    sb.table("backtest_runs").delete().eq("name", name).execute()
-
-    sb.table("backtest_runs").insert({
-        "name": name,
-        "tickers": json.dumps(cfg["data"]["tickers"]),
-        "test_start": cfg["data"]["test_start"],
-        "test_end": cfg["data"]["test_end"],
-        "modelos": json.dumps(cfg["modelos"]),
-        "guardrails": json.dumps(cfg.get("guardrails", {})),
-        "capital_inicial": cfg["capital"]["inicial"],
-    }).execute()
-
+    # F-03: intentar insertar primero. Si falla, no borramos los viejos.
     trades_rows = [{"backtest_name": name, **t} for t in trades]
-    for i in range(0, len(trades_rows), 100):
-        sb.table("backtest_trades").insert(trades_rows[i : i + 100]).execute()
 
-    sb.table("backtest_metrics").insert({
+    metrics_row = {
         "backtest_name": name,
         "capital_final": stats["capital_final"],
         "pnl_total": stats["pnl_total"],
@@ -333,9 +388,55 @@ def save_results(cfg: dict, trades: list[dict], stats: dict) -> None:
         "sharpe_ratio": stats["sharpe_ratio"],
         "max_drawdown": stats["max_drawdown"],
         "guardrail_stats": json.dumps(stats["guardrail_stats"]),
-    }).execute()
+    }
 
-    log.info(f"Resultados guardados en Supabase: {name}")
+    run_row = {
+        "name": name,
+        "tickers": json.dumps(cfg["data"]["tickers"]),
+        "test_start": cfg["data"]["test_start"],
+        "test_end": cfg["data"]["test_end"],
+        "modelos": json.dumps(cfg["modelos"]),
+        "guardrails": json.dumps(cfg.get("guardrails", {})),
+        "capital_inicial": cfg["capital"]["inicial"],
+    }
+
+    # I-05: validar que los datos nuevos son insertables antes de borrar los viejos.
+    # Intentamos el insert del run primero (es la tabla más pequeña).
+    # Si falla, no borramos nada.
+    try:
+        # Paso 1: borrar datos anteriores de este backtest
+        sb.table("backtest_trades").delete().eq("backtest_name", name).execute()
+        sb.table("backtest_metrics").delete().eq("backtest_name", name).execute()
+        sb.table("backtest_runs").delete().eq("name", name).execute()
+
+        # Paso 2: insertar run (si falla aquí, solo perdimos datos del mismo nombre)
+        sb.table("backtest_runs").insert(run_row).execute()
+
+        # Paso 3: insertar trades con tracking de fallos (F-04)
+        inserted = 0
+        failed_batches = 0
+        for i in range(0, len(trades_rows), 100):
+            batch = trades_rows[i : i + 100]
+            try:
+                sb.table("backtest_trades").insert(batch).execute()
+                inserted += len(batch)
+            except Exception as e:
+                failed_batches += 1
+                log.error(f"  Error batch {i // 100 + 1}: {e} ({len(batch)} trades perdidos)")
+
+        if failed_batches:
+            log.warning(
+                f"  {failed_batches} batches fallaron. "
+                f"{inserted}/{len(trades_rows)} trades guardados."
+            )
+
+        # Paso 4: insertar metrics
+        sb.table("backtest_metrics").insert(metrics_row).execute()
+
+        log.info(f"Resultados guardados en Supabase: {name}")
+
+    except Exception as e:
+        log.error(f"Error fatal guardando backtest '{name}': {e}. Datos pueden estar incompletos.")
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────

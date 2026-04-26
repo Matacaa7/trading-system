@@ -71,9 +71,15 @@ class BaseModel(ABC):
         """
         Calcula el intervalo de confianza para las predicciones.
 
-        Cada subclase decide la estrategia (bootstrap, percentiles,
-        MC dropout, etc.). Documentar la estrategia usada en la docstring
-        de la implementación concreta.
+        CONTRATO (F-111):
+        Cada subclase DEBE documentar la estrategia usada en su docstring.
+        Las estrategias NO son comparables entre modelos:
+            - XGBoost: bootstrap sobre X (mide sensibilidad al input)
+            - RandomForest: varianza entre árboles (mide consenso del ensemble)
+            - LightGBM: convergencia del boosting (mide estabilidad del training)
+            - LSTM/GRU/Transformer: MC Dropout (mide incertidumbre epistémica)
+
+        El frontend debe mostrar intervalos POR MODELO, nunca combinarlos.
 
         Args:
             X:     features

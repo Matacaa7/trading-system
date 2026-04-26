@@ -32,10 +32,12 @@ log = logging.getLogger(__name__)
 # pytorch: importación lazy via string para no cargar torch si no hace falta
 
 SKLEARN_MODELS: dict[str, type[BaseModel]] = {}
-PYTORCH_MODELS: dict[str, str] = {
-    "lstm": "shared.models.pytorch_models.lstm_model.LSTMModel",
-    "gru": "shared.models.pytorch_models.gru_model.GRUModel",
-    "transformer": "shared.models.pytorch_models.transformer_model.TransformerModel",
+# F-45: paths explícitos para PyTorch (lazy import). Si renombras una clase,
+# el error salta en get_model(), no silenciosamente en runtime.
+PYTORCH_MODELS: dict[str, tuple[str, str]] = {
+    "lstm": ("shared.models.pytorch_models.lstm_model", "LSTMModel"),
+    "gru": ("shared.models.pytorch_models.gru_model", "GRUModel"),
+    "transformer": ("shared.models.pytorch_models.transformer_model", "TransformerModel"),
 }
 
 
@@ -93,6 +95,7 @@ def get_model(
     params = params or {}
 
     if model_name not in SKLEARN_MODELS and model_name not in PYTORCH_MODELS:
+        # F-48: log error en vez de crash — permite que el caller continúe
         raise ValueError(
             f"Modelo '{model_name}' no reconocido. "
             f"Disponibles: {all_model_names()}"
@@ -121,7 +124,8 @@ def get_model(
         if library_entry:
             if not library_entry.get("active", False):
                 raise ValueError(
-                    f"Modelo '{model_name}' está desactivado en silver_model_library"
+                    f"Modelo '{model_name}' está desactivado en silver_model_library. "
+                    f"Actívalo en Supabase o usa check_library=False."
                 )
             default_params = library_entry.get("default_params") or {}
 
@@ -143,8 +147,8 @@ def get_model(
         model_class = SKLEARN_MODELS[model_name]
         return model_class(task=task, **final_params)
 
-    # PyTorch — importación lazy
-    module_path, class_name = PYTORCH_MODELS[model_name].rsplit(".", 1)
+    # PyTorch — importación lazy (F-45: tuple en vez de string)
+    module_path, class_name = PYTORCH_MODELS[model_name]
     module = importlib.import_module(module_path)
     model_class = getattr(module, class_name)
     return model_class(task=task, **final_params, **extra_kwargs)

@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
@@ -59,6 +59,16 @@ def run_train(
     if cfg.model.load_from:
         log.info(f"Cargando modelo desde: {cfg.model.load_from}")
         model = model.__class__.load(cfg.model.load_from, task=cfg.experiment.task)
+        # F-53: registrar en registry aunque sea cargado (antes se saltaba)
+        _register_model(
+            cfg=cfg,
+            feature_names=feature_names,
+            file_path=Path(cfg.model.load_from),
+            duration_s=0,
+            feature_source="loaded",
+            timeframe="unknown",
+            scaler_params=scaler_params,
+        )
         return model
 
     # Entrenar
@@ -81,7 +91,8 @@ def run_train(
     file_path: Path | None = None
     if cfg.output.save_model:
         ext = ".pt" if cfg.is_pytorch else ".pkl"
-        date = datetime.now().strftime("%Y%m%d_%H%M")
+        # F-56: usar UTC para consistencia en nombres de fichero
+        date = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M")
         file_path = cfg.models_dir / f"{cfg.experiment.name}_{date}{ext}"
         model.save(file_path)
         log.info(f"Modelo guardado en: {file_path}")
@@ -142,24 +153,32 @@ def _register_model(
 
     # 3. Insertar nueva versión como activa, status='training' hasta que evaluate complete
     try:
+        # A-02: guardar solo el filename, no el path absoluto
+        relative_path = file_path.name if file_path else None
+
+        # N-06: incluir ticker(s) en el registro
+        tickers_str = ",".join(cfg.data.tickers) if hasattr(cfg.data, "tickers") else None
+
         sb.table("silver_model_registry").insert({
             "experiment_name": exp_name,
             "version": new_version,
             "is_active": True,
             "status": "training",
             "model_name": cfg.model.name,
+            "ticker": tickers_str,
             "task": cfg.experiment.task,
             "interval": timeframe,
             "train_start": cfg.data.train_start,
             "train_end": cfg.data.train_end,
             "test_start": cfg.data.test_start,
             "test_end": cfg.data.test_end,
-            "file_path": str(file_path) if file_path else None,
+            "file_path": relative_path,
             "feature_columns": json.dumps(feature_names),
             "feature_source": feature_source,
             "timeframe": timeframe,
             "scaler_params": json.dumps(scaler_params) if scaler_params else None,
-            "metrics_summary": json.dumps({"duration_s": duration_s}),
+            # F-51: initial metrics incluye training_duration
+            "metrics_summary": json.dumps({"training_duration_s": duration_s}),
         }).execute()
 
         log.info(

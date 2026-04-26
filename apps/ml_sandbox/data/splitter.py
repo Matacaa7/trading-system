@@ -60,10 +60,39 @@ def split_data(
 
     # Features — usar columns del yaml si están especificadas
     if cfg.data.columns:
-        feature_cols = cfg.data.columns
+        feature_cols = list(cfg.data.columns)
     else:
         exclude = {"ts", "ticker", cfg.data.target}
         feature_cols = [c for c in df.columns if c not in exclude]
+
+    # Auto-incluir columnas de context_tickers (prefijadas con {ticker}_)
+    context_tickers = getattr(cfg.data, "context_tickers", [])
+    if context_tickers:
+        ctx_cols = [
+            c for c in df.columns
+            if any(c.startswith(f"{t}_") for t in context_tickers)
+            and c not in feature_cols
+        ]
+        if ctx_cols:
+            feature_cols.extend(ctx_cols)
+            log.info(f"Context features añadidas: {len(ctx_cols)} columnas de {context_tickers}")
+
+    # N-19: detectar data leak (target en features)
+    if cfg.data.target in feature_cols:
+        log.warning(
+            f"⚠️  DATA LEAK DETECTADO: '{cfg.data.target}' está en las features "
+            f"Y es el target. Eliminándolo de features para evitar leak."
+        )
+        feature_cols = [c for c in feature_cols if c != cfg.data.target]
+
+    # N-20: advertir si no hay gap entre train y test
+    train_end_ts = pd.Timestamp(cfg.data.train_end, tz="UTC") if cfg.data.train_end else None
+    test_start_ts = pd.Timestamp(cfg.data.test_start, tz="UTC")
+    if train_end_ts and (test_start_ts - train_end_ts) < pd.Timedelta(days=1):
+        log.warning(
+            f"Sin gap entre train_end ({cfg.data.train_end}) y test_start ({cfg.data.test_start}). "
+            f"Posible leak de 1 barra en el target."
+        )
 
     X_train = train_df[feature_cols].values.astype(np.float32)
     X_test = test_df[feature_cols].values.astype(np.float32)
@@ -71,16 +100,25 @@ def split_data(
     # Target — si cargamos desde silver, target ya está en el df
     if cfg.is_pytorch and cfg.data.source != "silver":
         table = cfg.data.tables[0] if cfg.data.tables else "silver_features_1m"
-        resp = (
-            sb.table(table)
-            .select(f"ts,ticker,{cfg.data.target}")
-            .eq("ticker", cfg.data.tickers[0])
-            .gte("ts", cfg.data.train_start)
-            .lte("ts", cfg.data.test_end)
-            .order("ts")
-            .execute()
-        )
-        target_df = pd.DataFrame(resp.data)
+        # F-100: cargar target para TODOS los tickers, no solo el primero
+        all_target_dfs = []
+        for ticker in cfg.data.tickers:
+            resp = (
+                sb.table(table)
+                .select(f"ts,ticker,{cfg.data.target}")
+                .eq("ticker", ticker)
+                .gte("ts", cfg.data.train_start)
+                .lte("ts", cfg.data.test_end)
+                .order("ts")
+                .execute()
+            )
+            if resp.data:
+                all_target_dfs.append(pd.DataFrame(resp.data))
+
+        if not all_target_dfs:
+            raise ValueError(f"No se encontraron targets para {cfg.data.tickers}")
+
+        target_df = pd.concat(all_target_dfs)
         target_df["ts"] = pd.to_datetime(target_df["ts"], utc=True)
         train_target = target_df[target_df["ts"].isin(train_df["ts"])]
         test_target = target_df[target_df["ts"].isin(test_df["ts"])]
@@ -91,6 +129,10 @@ def split_data(
         y_test_raw = test_df[cfg.data.target].values
 
     if cfg.experiment.task == "classification":
+        # F-107: target_threshold define el umbral para convertir el target continuo
+        # en binario. Si target='returns' y threshold=0, entonces:
+        #   returns > 0 → clase 1 (sube)
+        #   returns <= 0 → clase 0 (baja)
         y_train = (y_train_raw > cfg.data.target_threshold).astype(np.int32)
         y_test = (y_test_raw > cfg.data.target_threshold).astype(np.int32)
         log.info(f"Train — sube: {y_train.sum()} / baja: {(y_train == 0).sum()}")

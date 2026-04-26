@@ -69,7 +69,7 @@ def make_dataloaders(
         train_dataset,
         batch_size=batch_size,
         shuffle=False,   # No shuffle en series temporales
-        drop_last=True,
+        drop_last=False,  # N-21: antes True, descartaba últimas muestras
     )
     test_loader = DataLoader(
         test_dataset,

@@ -38,7 +38,9 @@ def save_signals(signals: list[dict]) -> None:
 
 
 def save_decision(decision: dict, detalle: dict) -> None:
-    """Guarda la decisión combinada en gold_decisions."""
+    """Guarda la decisión combinada en gold_decisions.
+    F-29: el campo ejecutada se escribe con el valor real del dict.
+    """
     try:
         row = {
             "ts": decision["ts"],
@@ -67,22 +69,34 @@ def save_log(
     errores: list[str],
     status: str,
     run_id: str = "",
+    max_retries: int = 3,
 ) -> None:
-    """Guarda el log de auditoría de cada ejecución en gold_logs."""
-    try:
-        sb.table("gold_logs").insert({
-            "run_at": utc_isoformat(),
-            "run_id": run_id,
-            "duration_s": round(duration_s, 2),
-            "tickers_procesados": json.dumps(tickers_procesados),
-            "senales_generadas": senales_generadas,
-            "ordenes_ejecutadas": ordenes_ejecutadas,
-            "errores": json.dumps(errores),
-            "status": status,
-        }).execute()
-        log.info(f"  Log guardado: {status} ({duration_s:.1f}s)")
-    except Exception as e:
-        log.error(f"Error guardando log: {e}")
+    """Guarda el log de auditoría de cada ejecución en gold_logs.
+    F-30: con retry (hasta max_retries intentos).
+    """
+    row = {
+        "run_at": utc_isoformat(),
+        "run_id": run_id,
+        "duration_s": round(duration_s, 2),
+        "tickers_procesados": json.dumps(tickers_procesados),
+        "senales_generadas": senales_generadas,
+        "ordenes_ejecutadas": ordenes_ejecutadas,
+        "errores": json.dumps(errores),
+        "status": status,
+    }
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            sb.table("gold_logs").insert(row).execute()
+            log.info(f"  Log guardado: {status} ({duration_s:.1f}s)")
+            return
+        except Exception as e:
+            if attempt < max_retries:
+                log.warning(f"  Retry save_log ({attempt}/{max_retries}): {e}")
+                import time
+                time.sleep(1)
+            else:
+                log.error(f"Error guardando log tras {max_retries} intentos: {e}")
 
 
 def save_timing(

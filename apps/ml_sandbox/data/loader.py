@@ -39,7 +39,12 @@ def load_data(cfg: ExperimentConfig) -> pd.DataFrame:
 
 
 def _load_from_silver(cfg: ExperimentConfig) -> pd.DataFrame:
-    """Carga datos desde silver_features en Supabase."""
+    """Carga datos desde silver_features en Supabase.
+    
+    Si cfg.data.context_tickers está definido, carga también las features
+    de esos tickers y las une por timestamp con prefijo {ticker}_.
+    El modelo puede así usar contexto de mercado (ej: GLD_rsi_14, MSFT_returns_5).
+    """
     all_dfs = []
 
     select_cols = ["ts", "ticker"] + cfg.data.columns + [cfg.data.target]
@@ -83,12 +88,76 @@ def _load_from_silver(cfg: ExperimentConfig) -> pd.DataFrame:
 
     result = pd.concat(all_dfs).sort_values(["ts", "ticker"])
 
+    # ── Context tickers: cargar features de otros tickers como columnas extra ──
+    context_tickers = getattr(cfg.data, "context_tickers", [])
+    if context_tickers:
+        log.info(f"Cargando context_tickers: {context_tickers}")
+        # Solo columnas de features (sin target ni ts/ticker)
+        ctx_cols = [c for c in cfg.data.columns if c != cfg.data.target]
+        ctx_select = ["ts", "ticker"] + ctx_cols
+        ctx_select = list(dict.fromkeys(ctx_select))
+
+        for table in cfg.data.tables:
+            for ctx_ticker in context_tickers:
+                rows: list[dict] = []
+                offset = 0
+                while True:
+                    try:
+                        resp = (
+                            sb.table(table)
+                            .select(",".join(ctx_select))
+                            .eq("ticker", ctx_ticker)
+                            .gte("ts", cfg.data.train_start)
+                            .lte("ts", cfg.data.test_end)
+                            .order("ts")
+                            .range(offset, offset + 999)
+                            .execute()
+                        )
+                        batch = resp.data or []
+                        rows.extend(batch)
+                        if len(batch) < 1000:
+                            break
+                        offset += 1000
+                    except Exception as e:
+                        log.error(f"Error cargando context {ctx_ticker}: {e}")
+                        break
+
+                if not rows:
+                    log.warning(f"  context {ctx_ticker}: sin datos — omitiendo")
+                    continue
+
+                ctx_df = pd.DataFrame(rows)
+                ctx_df["ts"] = pd.to_datetime(ctx_df["ts"], utc=True)
+                log.info(f"  context {ctx_ticker}: {len(ctx_df)} filas")
+
+                # Renombrar columnas con prefijo {ticker}_
+                rename_map = {
+                    c: f"{ctx_ticker}_{c}"
+                    for c in ctx_cols
+                    if c in ctx_df.columns
+                }
+                ctx_df = ctx_df.rename(columns=rename_map)
+                ctx_df = ctx_df.drop(columns=["ticker"], errors="ignore")
+
+                # Merge por timestamp
+                result = result.merge(ctx_df, on="ts", how="left")
+                log.info(f"  → {len(rename_map)} features añadidas con prefijo {ctx_ticker}_")
+
     if cfg.data.dropna:
         before = len(result)
-        result = result.dropna(subset=cfg.data.columns + [cfg.data.target])
+        # Solo dropna en columnas principales (no context, que pueden tener gaps)
+        main_cols = cfg.data.columns + [cfg.data.target]
+        existing = [c for c in main_cols if c in result.columns]
+        result = result.dropna(subset=existing)
         log.info(f"Filas eliminadas por NaN: {before - len(result)}")
 
-    log.info(f"Total filas cargadas: {len(result)}")
+    # Rellenar NaN de context tickers con 0 (gaps de mercado entre tickers)
+    if context_tickers:
+        ctx_feature_cols = [c for c in result.columns if any(c.startswith(f"{t}_") for t in context_tickers)]
+        result[ctx_feature_cols] = result[ctx_feature_cols].fillna(0)
+        log.info(f"Context features ({len(ctx_feature_cols)} cols) — NaN rellenados con 0")
+
+    log.info(f"Total filas cargadas: {len(result)} — {len(result.columns)} columnas")
     return result
 
 
@@ -131,14 +200,15 @@ def _load_from_tensor(cfg: ExperimentConfig) -> pd.DataFrame:
     tensor_filtered = tensor[ts_mask]
     ts_filtered = timestamps[ts_mask]
 
+    # F-101: vectorizado con numpy en vez de triple loop Python
     rows = []
     for t_idx, ticker in zip(ticker_indices, cfg.data.tickers):
-        for i, ts in enumerate(ts_filtered):
-            row = {"ts": ts, "ticker": ticker}
-            for f_idx, col_name in enumerate(column_names):
-                row[col_name] = tensor_filtered[i, t_idx, f_idx]
-            rows.append(row)
+        ticker_data = tensor_filtered[:, t_idx, :]  # (n_timestamps, n_features)
+        ticker_df = pd.DataFrame(ticker_data, columns=column_names)
+        ticker_df["ts"] = ts_filtered
+        ticker_df["ticker"] = ticker
+        rows.append(ticker_df)
 
-    result = pd.DataFrame(rows)
+    result = pd.concat(rows, ignore_index=True)
     log.info(f"Tensor cargado: {result.shape} — columnas: {column_names[:5]}...")
     return result

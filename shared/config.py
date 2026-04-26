@@ -53,6 +53,22 @@ class _Config:
         )
         self.alpaca_paper: bool = "paper" in self.alpaca_base_url
 
+        # ── Protección contra modo live accidental ─────
+        if not self.alpaca_paper:
+            import logging
+            _log = logging.getLogger(__name__)
+            _log.critical(
+                "⚠️  ALPACA_BASE_URL NO apunta a paper trading. "
+                "Cambia a https://paper-api.alpaca.markets/v2 o "
+                "establece la variable ALLOW_LIVE_TRADING=true para continuar."
+            )
+            if not os.getenv("ALLOW_LIVE_TRADING", "").lower() == "true":
+                raise RuntimeError(
+                    "ALPACA_BASE_URL apunta a live trading. "
+                    "Esto es probablemente un error. Si es intencional, "
+                    "establece ALLOW_LIVE_TRADING=true en tu .env"
+                )
+
         # ─── HuggingFace ───────────────────────────
         self.huggingface_token: str = self._require("HUGGINGFACE_TOKEN")
 

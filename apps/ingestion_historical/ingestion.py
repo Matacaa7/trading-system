@@ -92,7 +92,8 @@ def _log_ingestion(
 ) -> None:
     """Registra la ingesta en la tabla de logs."""
     try:
-        sb.table("ingestion_logs").insert({
+        # N-07: nombre de tabla alineado con schema Supabase
+        sb.table("ingestion_log").insert({
             "run_at": utc_isoformat(),
             "ticker": ticker,
             "interval": interval,
@@ -105,7 +106,11 @@ def _log_ingestion(
             "duration_s": round(duration_s, 2),
         }).execute()
     except Exception as e:
-        log.warning(f"  Error logging ingestion: {e}")
+        log.warning(
+            f"  Error logging ingestion: {e}. "
+            f"Verifica que la tabla 'ingestion_log' existe en Supabase "
+            f"(puede llamarse 'ingestion_logs' — ver scripts/schema_fixes.sql)."
+        )
 
 
 # ── Ingesta de un bloque ──────────────────────────────────────────────────────

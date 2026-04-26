@@ -8,6 +8,11 @@
 data:
   tickers:
     - "AAPL"
+  context_tickers:
+    - "YPF"
+    - "UNG"
+    - "BBAR"
+    - "GGAL"
   timeframe: "1m"
 
 modelos:
@@ -38,5 +43,7 @@ capital:
   cierre_fin_dia: true
 
 guardrails:
+  # F-21: score_threshold configurable (antes hardcoded 50)
+  score_threshold: 50
   posicion_abierta:
     activo: true

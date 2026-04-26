@@ -10,7 +10,11 @@ atr_volatilidad y circuit_breaker que backtest.py no tenía (F-17).
 Cambios respecto a los originales:
     - F-17: backtest ahora tiene los 14 guardrails (antes solo 12)
     - F-18: circuit_breaker usa shared.db.sb (antes creaba cliente por iteración)
-    - F-19: circuit_breaker falla gracefully con warning (antes tragaba el error)
+    - F-19: circuit_breaker falla gracefully con warning
+    - F-21: score_threshold configurable desde yaml (antes hardcoded 50)
+    - F-22: atr_volatilidad renombrado a max_atr_pct (antes max_multiplicador)
+    - F-23: is_market_open default False (fail-closed, antes True)
+    - F-24: sentiment None se trata como "sin datos" configurable
     - decide() también unificada aquí (usada por backtest y live)
 """
 
@@ -22,6 +26,9 @@ from datetime import datetime, timezone
 import pandas as pd
 
 log = logging.getLogger(__name__)
+
+# F-21: threshold por defecto, sobreescribible desde yaml
+DEFAULT_SCORE_THRESHOLD = 50
 
 
 def check_guardrails(
@@ -42,6 +49,10 @@ def check_guardrails(
     Returns:
         (pasa, motivo_rechazo)
     """
+    # F-21: score threshold configurable desde yaml
+    score_threshold = cfg_gr.get("score_threshold", DEFAULT_SCORE_THRESHOLD)
+    is_bullish = score >= score_threshold
+
     # 1. Score mínimo
     gr = cfg_gr.get("score_minimo", {})
     if gr.get("activo") and score < gr.get("valor", 65):
@@ -52,32 +63,34 @@ def check_guardrails(
     if gr.get("activo"):
         rsi = row.get("rsi_14")
         if rsi is not None:
-            if score >= 50 and rsi > gr.get("compra_max", 70):
+            if is_bullish and rsi > gr.get("compra_max", 70):
                 return False, f"rsi_sobrecompra ({rsi:.1f} > {gr['compra_max']})"
-            if score < 50 and rsi < gr.get("venta_min", 30):
+            if not is_bullish and rsi < gr.get("venta_min", 30):
                 return False, f"rsi_sobreventa ({rsi:.1f} < {gr['venta_min']})"
 
     # 3. MACD
     gr = cfg_gr.get("macd", {})
     if gr.get("activo"):
-        if score >= 50 and row.get("macd_line", 0) < row.get("macd_signal", 0):
+        if is_bullish and row.get("macd_line", 0) < row.get("macd_signal", 0):
             return False, "macd_bajista"
 
     # 4. Bollinger
     gr = cfg_gr.get("bollinger", {})
     if gr.get("activo"):
         bb_pct = row.get("bb_pct")
-        if bb_pct is not None and score >= 50 and bb_pct > gr.get("compra_max", 0.95):
+        if bb_pct is not None and is_bullish and bb_pct > gr.get("compra_max", 0.95):
             return False, f"bollinger_techo ({bb_pct:.2f} > {gr['compra_max']})"
 
     # 5. ATR volatilidad (F-17: faltaba en backtest)
+    # F-22: renombrado de max_multiplicador a max_atr_pct (acepta ambos por compat)
     gr = cfg_gr.get("atr_volatilidad", {})
     if gr.get("activo"):
         atr_val = row.get("atr_14", 0)
         close = row.get("close", 1)
         atr_pct = atr_val / close * 100 if close > 0 else 0
-        if atr_pct > gr.get("max_multiplicador", 2.0):
-            return False, f"atr_volatilidad ({atr_pct:.2f} > {gr['max_multiplicador']})"
+        max_atr = gr.get("max_atr_pct", gr.get("max_multiplicador", 2.0))
+        if atr_pct > max_atr:
+            return False, f"atr_volatilidad ({atr_pct:.2f}% > {max_atr}%)"
 
     # 6. Volumen
     gr = cfg_gr.get("volumen", {})
@@ -91,7 +104,7 @@ def check_guardrails(
     if gr.get("activo"):
         close = row.get("close", 0)
         ema_21 = row.get("ema_21", 0)
-        if score >= 50 and close < ema_21:
+        if is_bullish and close < ema_21:
             return False, f"ema_bajista (close {close:.2f} < ema_21 {ema_21:.2f})"
 
     # 8. VWAP spread
@@ -99,22 +112,27 @@ def check_guardrails(
     if gr.get("activo"):
         close = row.get("close", 0)
         vwap_val = row.get("vwap", 0)
-        if vwap_val > 0 and score >= 50:
+        if vwap_val > 0 and is_bullish:
             spread = (close - vwap_val) / vwap_val * 100
             if spread > gr.get("max_spread_pct", 2.0):
                 return False, f"vwap_spread ({spread:.2f}% > {gr['max_spread_pct']}%)"
 
     # 9. Sentiment
+    # F-24: None se trata como "sin datos". Si bloquear_sin_datos=true, bloquea.
     gr = cfg_gr.get("sentiment", {})
     if gr.get("activo"):
         sent_score = row.get("sentiment_score")
-        if sent_score is not None and sent_score < gr.get("min_score", 0.0):
+        if sent_score is None:
+            if gr.get("bloquear_sin_datos", False):
+                return False, "sentiment_sin_datos"
+        elif sent_score < gr.get("min_score", 0.0):
             return False, f"sentiment_negativo ({sent_score:.3f})"
 
     # 10. Horario mercado
+    # F-23: default False (fail-closed — si no hay dato, asume cerrado)
     gr = cfg_gr.get("horario_mercado", {})
     if gr.get("activo"):
-        if not row.get("is_market_open", True):
+        if not row.get("is_market_open", False):
             return False, "fuera_horario_mercado"
 
     # 11. Posición abierta
@@ -148,7 +166,11 @@ def check_guardrails(
             if resp.data and not resp.data.get("trading_enabled", True):
                 return False, "circuit_breaker_activo"
         except Exception as e:
-            log.warning(f"Error leyendo circuit_breaker: {e}")
+            # F-19: si la tabla no existe, log warning claro
+            log.warning(
+                f"Circuit breaker: no se pudo leer tabla 'config': {e}. "
+                f"Asegúrate de que existe (ver scripts/schema_fixes.sql)."
+            )
 
     return True, ""
 
@@ -177,6 +199,9 @@ def decide(
 
     pasa, motivo = check_guardrails(row, score_final, cfg_gr, estado)
 
+    # F-21: score_threshold configurable
+    score_threshold = cfg_gr.get("score_threshold", DEFAULT_SCORE_THRESHOLD)
+
     if not pasa:
         log.info(f"  {ticker}: RECHAZADO — {motivo}")
         return {
@@ -188,7 +213,7 @@ def decide(
             "motivo_rechazo": motivo,
         }
 
-    decision = "BUY" if score_final >= 50 else "HOLD"
+    decision = "BUY" if score_final >= score_threshold else "HOLD"
     log.info(f"  {ticker}: {decision} — score {score_final:.1f}")
 
     return {

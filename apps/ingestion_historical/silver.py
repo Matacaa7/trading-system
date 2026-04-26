@@ -120,14 +120,65 @@ def calc_features(df: pd.DataFrame, ticker: str) -> pd.DataFrame:
     # Market open (F-76: DST, F-77: festivos via exchange_calendars)
     out["is_market_open"] = is_market_open(pd.Series(out.index, index=out.index))
 
+    # I-01: category del ticker (antes nunca se escribía)
+    from shared.symbols import SYMBOL_CATEGORY
+    out["category"] = SYMBOL_CATEGORY.get(ticker, "unknown")
+
     # Sentiment (por defecto None, se enriquece después)
     out["sentiment_label"] = None
     out["sentiment_score"] = None
+    # N-05: calcular sentiment_label_encoded (paridad con silver_rt)
+    out["sentiment_label_encoded"] = 0
+
+    # D-08/N-22: news_count features (antes solo en schema, nunca calculados)
+    out["news_count_1h"] = 0
+    out["news_count_24h"] = 0
+    out["has_news"] = 0
 
     return out
 
 
 # ── Enriquecimiento con sentiment ─────────────────────────────────────────────
+
+
+def _compute_news_counts(df: pd.DataFrame, ticker: str) -> pd.DataFrame:
+    """D-08/N-22: Calcula news_count_1h, news_count_24h, has_news por barra."""
+    try:
+        ts_min = df.index.min() - pd.Timedelta(hours=24)
+        ts_max = df.index.max()
+        resp = (
+            sb.table("silver_news_alpaca")
+            .select("published_at")
+            .eq("ticker", ticker)
+            .gte("published_at", ts_min.isoformat())
+            .lte("published_at", ts_max.isoformat())
+            .order("published_at")
+            .execute()
+        )
+        news_data = resp.data or []
+    except Exception:
+        return df
+
+    if not news_data:
+        return df
+
+    news_ts = pd.to_datetime(
+        [n["published_at"] for n in news_data], utc=True
+    ).sort_values()
+
+    counts_1h = []
+    counts_24h = []
+    for ts in df.index:
+        c1 = ((news_ts >= ts - pd.Timedelta(hours=1)) & (news_ts <= ts)).sum()
+        c24 = ((news_ts >= ts - pd.Timedelta(hours=24)) & (news_ts <= ts)).sum()
+        counts_1h.append(int(c1))
+        counts_24h.append(int(c24))
+
+    df["news_count_1h"] = counts_1h
+    df["news_count_24h"] = counts_24h
+    df["has_news"] = (df["news_count_1h"] > 0).astype(int)
+    return df
+
 
 # ── Guardado en silver ────────────────────────────────────────────────────────
 
@@ -139,6 +190,7 @@ def save_silver(df: pd.DataFrame, ticker: str, interval: str) -> int:
     table = SILVER_TABLES[interval]
 
     cols = [
+        "category",
         "open", "high", "low", "close", "volume",
         "ema_9", "ema_12", "ema_21", "ema_50",
         "rsi_14", "macd_line", "macd_signal", "macd_hist",
@@ -146,7 +198,8 @@ def save_silver(df: pd.DataFrame, ticker: str, interval: str) -> int:
         "vwap", "atr_14",
         "returns", "returns_5", "returns_15", "range_pct", "volume_norm",
         "hour", "dayofweek", "is_market_open",
-        "sentiment_label", "sentiment_score",
+        "sentiment_label", "sentiment_score", "sentiment_label_encoded",
+        "news_count_1h", "news_count_24h", "has_news",
     ]
 
     rows = []
@@ -204,6 +257,13 @@ def run_silver(
             if enrich_news:
                 log.info(f"  [{interval}] Enriqueciendo con sentiment...")
                 df = enrich_sentiment(df, ticker)
+                # N-05: calcular sentiment_label_encoded
+                label_map = {"positive": 1, "neutral": 0, "negative": -1}
+                df["sentiment_label_encoded"] = (
+                    df["sentiment_label"].map(label_map).fillna(0).astype(int)
+                )
+                # D-08/N-22: calcular news_count_1h, news_count_24h, has_news
+                df = _compute_news_counts(df, ticker)
 
             # Solo guardar los USEFUL_DAYS más recientes (descartar warm-up)
             df = df[df.index >= cutoff]

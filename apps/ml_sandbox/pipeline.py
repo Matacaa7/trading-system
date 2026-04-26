@@ -43,7 +43,7 @@ def main():
     log.info(f"Modelo: {cfg.model.name} | Task: {cfg.experiment.task}")
     log.info(f"Tickers: {cfg.data.tickers}")
 
-    # Cargar datos
+    # F-102: cargar datos (necesario tanto para train como para test)
     log.info("Cargando datos...")
     df = load_data(cfg)
 

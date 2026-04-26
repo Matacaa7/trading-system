@@ -204,17 +204,31 @@ def predict_ensemble(
             log.warning(f"  Error prediciendo con {m['experiment_name']}: {e}")
 
     if not scores:
+        log.warning(
+            f"  [{ticker}] NINGÚN modelo respondió. "
+            f"Score por defecto 50.0 (neutral). Decisión no fiable."
+        )
         return 50.0, detalle, signals
 
     # F-12: avisar si algunos modelos fallaron y los pesos se re-normalizan
     n_ok = len(scores)
     n_total = len(modelos)
     if n_ok < n_total:
+        modelos_fallidos = [
+            m["experiment_name"]
+            for m in modelos
+            if m["experiment_name"] not in detalle
+        ]
         log.warning(
             f"  {n_ok}/{n_total} modelos respondieron. "
-            f"Pesos re-normalizados (modelos fallidos: "
-            f"{[m['experiment_name'] for m in modelos if m['experiment_name'] not in detalle]})"
+            f"Pesos re-normalizados. Modelos fallidos: {modelos_fallidos}"
         )
+        # Si menos de la mitad responden, marcar como no fiable
+        if n_ok < n_total / 2:
+            log.warning(
+                f"  ATENCIÓN: menos de la mitad de modelos respondieron "
+                f"({n_ok}/{n_total}). Predicción poco fiable."
+            )
 
     total_peso = sum(p for _, p in scores)
     score_final = sum(s * p for s, p in scores) / total_peso if total_peso > 0 else 50.0
@@ -295,7 +309,8 @@ def _predict_pytorch(
     if missing:
         log.warning(
             f"  [{experiment_name}] {len(missing)} features faltantes "
-            f"rellenadas con 0: {missing}"
+            f"rellenadas con 0: {missing}. "
+            f"Predicción puede estar sesgada."
         )
         for col in missing:
             hist[col] = 0.0
