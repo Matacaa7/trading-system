@@ -14,7 +14,7 @@ data:
   # context_tickers: features de otros tickers como columnas extra
   # Se añaden automáticamente al entrenamiento con prefijo {ticker}_
   # Ejemplo: context_tickers: ["GLD", "MSFT"] añade GLD_rsi_14, MSFT_returns_5, etc.
-  context_tickers: ["YPF", "UNG", "BBAR", "GGAL"]
+  context_tickers: []
   tables: ["silver_features_1m"]
   columns:
     - ema_9

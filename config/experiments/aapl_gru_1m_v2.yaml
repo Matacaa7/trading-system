@@ -12,7 +12,7 @@ model:
 
 data:
   tickers: ["AAPL"]
-  context_tickers: ["YPF", "UNG", "BBAR", "GGAL"]
+  context_tickers: []
   tables: ["silver_features_1m"]
   columns:
     - ema_9

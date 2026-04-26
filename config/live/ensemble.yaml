@@ -9,10 +9,11 @@ data:
   tickers:
     - "AAPL"
   context_tickers:
-    - "YPF"
-    - "UNG"
-    - "BBAR"
-    - "GGAL"
+    # Features de estos tickers se añaden como columnas extra (ej: GLD_rsi_14)
+    # Dejar vacío para no usar contexto cross-ticker
+    # - "GLD"
+    # - "MSFT"
+    # - "SPY"
   timeframe: "1m"
 
 modelos:
