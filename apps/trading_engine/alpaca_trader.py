@@ -145,16 +145,17 @@ def execute_order(
             log.warning(f"  {ticker}: precio inválido ({precio})")
             return None
 
-        # Calcular cantidad (F-36: fraccional, antes redondeaba a enteros)
+        # Calcular cantidad — bracket orders requieren qty entera (no fraccional)
         capital = estado.get("capital", cfg_capital["inicial"])
         posicion_max_pct = cfg_capital.get("posicion_max_pct", 10) / 100
         stop_loss_pct = cfg_capital.get("stop_loss_pct", 5) / 100
         take_profit_pct = cfg_capital.get("take_profit_pct", 10) / 100
 
-        qty = round((capital * posicion_max_pct) / precio, 4)
+        import math
+        qty = math.floor((capital * posicion_max_pct) / precio)
 
-        if qty < 0.01:
-            log.warning(f"  {ticker}: qty < 0.01 — orden omitida")
+        if qty < 1:
+            log.warning(f"  {ticker}: qty < 1 — capital insuficiente para 1 acción (precio={precio})")
             return None
 
         stop_price = round(precio * (1 - stop_loss_pct), 2)

@@ -45,6 +45,7 @@ app.add_middleware(
 )
 
 _live_process: subprocess.Popen | None = None
+_live_log_path: Path = ROOT / "data" / "logs" / "pipeline_live.log"
 
 # ── Schemas ───────────────────────────────────────────────────────────────────
 
@@ -471,12 +472,36 @@ async def start_live(config: LiveConfig):
     global _live_process
     if _live_process and _live_process.poll() is None:
         raise HTTPException(400, "El trading engine ya está corriendo")
+
+    # Ensure log dir exists
+    _live_log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Write stdout/stderr to file instead of PIPE (PIPE blocks on Windows)
+    log_file = open(_live_log_path, "w", encoding="utf-8")
     _live_process = subprocess.Popen(
         [sys.executable, "-m", "apps.trading_engine.main"],
-        cwd=str(ROOT), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        cwd=str(ROOT),
+        stdout=log_file,
+        stderr=subprocess.STDOUT,
+        text=True,
         env={**os.environ, "PYTHONPATH": str(ROOT)},
     )
     log.info(f"Trading engine arrancado — PID {_live_process.pid}")
+
+    # Quick check: did it crash immediately?
+    import asyncio
+    await asyncio.sleep(1)
+    if _live_process.poll() is not None:
+        log_file.close()
+        rc = _live_process.returncode
+        error_text = ""
+        try:
+            error_text = _live_log_path.read_text(encoding="utf-8")[-500:]
+        except Exception:
+            pass
+        _live_process = None
+        raise HTTPException(500, f"Pipeline crashed on start (exit {rc}): {error_text}")
+
     return {"status": "started", "pid": _live_process.pid}
 
 
@@ -484,6 +509,7 @@ async def start_live(config: LiveConfig):
 async def stop_live():
     global _live_process
     if not _live_process or _live_process.poll() is not None:
+        _live_process = None
         return {"status": "not_running"}
     _live_process.terminate()
     try:
@@ -499,6 +525,10 @@ async def stop_live():
 @app.get("/api/live/status")
 async def live_status():
     running = _live_process is not None and _live_process.poll() is None
+    # If process died unexpectedly, clean up
+    if _live_process is not None and _live_process.poll() is not None:
+        log.warning(f"Pipeline process died (exit code {_live_process.poll()})")
+
     last_log = sb.table("gold_logs").select("run_at,status,duration_s,errores").order("run_at", desc=True).limit(1).execute()
     trading_enabled = False
     try:
@@ -512,6 +542,20 @@ async def live_status():
         "trading_enabled": trading_enabled,
         "last_run": last_log.data[0] if last_log.data else None,
     }
+
+
+@app.get("/api/live/logs")
+async def live_logs(lines: int = 50):
+    """Últimas líneas del log del pipeline."""
+    if not _live_log_path.exists():
+        return {"logs": "", "lines": 0}
+    try:
+        text = _live_log_path.read_text(encoding="utf-8", errors="replace")
+        all_lines = text.strip().split("\n")
+        tail = all_lines[-lines:] if len(all_lines) > lines else all_lines
+        return {"logs": "\n".join(tail), "lines": len(tail)}
+    except Exception as e:
+        return {"logs": f"Error reading log: {e}", "lines": 0}
 
 
 # ── Endpoints: Signals & Trades ──────────────────────────────────────────────

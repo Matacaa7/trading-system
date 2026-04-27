@@ -150,6 +150,8 @@ def _reconcile_one(trade: dict, client: TradingClient) -> dict | None:
 def reconcile_trades() -> int:
     """
     Revisa todos los trades abiertos y actualiza los que hayan cerrado.
+    También detecta cierres manuales: si un trade está abierto en gold_trades
+    pero la posición ya no existe en Alpaca, se marca como cerrado.
 
     Returns:
         Número de trades actualizados.
@@ -164,8 +166,30 @@ def reconcile_trades() -> int:
     client = _get_trading_client()
     updated = 0
 
+    # Get current Alpaca positions to detect manual closes
+    try:
+        positions = client.get_all_positions()
+        open_tickers = {p.symbol for p in positions}
+    except Exception as e:
+        log.warning(f"  No se pudieron obtener posiciones de Alpaca: {e}")
+        open_tickers = None  # Skip manual close detection
+
     for trade in open_trades:
         result = _reconcile_one(trade, client)
+
+        # If normal reconciliation found nothing, check for manual close
+        if result is None and open_tickers is not None:
+            ticker = trade["ticker"]
+            if ticker not in open_tickers:
+                log.info(f"  {ticker}: posición no existe en Alpaca — cierre manual detectado")
+                result = {
+                    "ts_salida": utc_isoformat(),
+                    "precio_salida": trade["precio_entrada"],  # Best estimate
+                    "pnl": 0.0,
+                    "pnl_pct": 0.0,
+                    "motivo_salida": "cierre_manual_alpaca",
+                    "status": "closed",
+                }
 
         if result is None:
             continue
