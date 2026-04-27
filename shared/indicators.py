@@ -150,7 +150,7 @@ def is_market_open(ts_series: pd.Series) -> pd.Series:
             # Festivo o fin de semana → cerrado
             continue
 
-        session = pd.Timestamp(date, tz="UTC")
+        session = pd.Timestamp(date)
         try:
             market_open = nyse.session_open(session)
             market_close = nyse.session_close(session)

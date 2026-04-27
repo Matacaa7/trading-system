@@ -133,7 +133,7 @@ def compute_silver_rt(
                 .select("ticker,timeframe,ts,open,high,low,close,volume")
                 .eq("ticker", ticker)
                 .eq("timeframe", timeframe)
-                .order("ts", desc=False)
+                .order("ts", desc=True)
                 .limit(200)
                 .execute()
             )

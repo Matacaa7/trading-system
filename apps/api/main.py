@@ -138,6 +138,7 @@ def _generate_experiment_yaml(req: TrainRequest) -> tuple[Path, str]:
 
 def _generate_backtest_yaml(req: BacktestRequest) -> tuple[Path, str]:
     bt_name = req.name.strip() if req.name.strip() else f"bt_{'_'.join(req.tickers).lower()}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M')}"
+    g = req.guardrails
     config = {
         "backtest": {"name": bt_name, "description": f"Backtest UI — {req.test_start} a {req.test_end}"},
         "data": {
@@ -146,14 +147,27 @@ def _generate_backtest_yaml(req: BacktestRequest) -> tuple[Path, str]:
         },
         "modelos": [{"experiment_name": m["experiment_name"], "activo": m.get("activo", True), "peso": m.get("peso", 0.15)} for m in req.modelos],
         "capital": req.capital or {
-            "inicial": 100000, "posicion_max_pct": 10,
-            "stop_loss_pct": req.guardrails.get("stop_loss", 5),
-            "take_profit_pct": req.guardrails.get("take_profit", 10),
-            "cierre_fin_dia": req.guardrails.get("cierre_fin_dia", True),
+            "inicial": 100000, "posicion_max_pct": g.get("posicion_max_pct", 10),
+            "stop_loss_pct": g.get("stop_loss", 5),
+            "take_profit_pct": g.get("take_profit", 10),
+            "cierre_fin_dia": g.get("cierre_fin_dia", True),
         },
         "guardrails": {
-            "score_threshold": req.guardrails.get("score_threshold", 50),
-            "posicion_abierta": {"activo": req.guardrails.get("posicion_abierta", True)},
+            "score_threshold": g.get("score_threshold", 50),
+            "score_minimo": {"activo": g.get("score_minimo_activo", False), "valor": g.get("score_minimo_valor", 65)},
+            "rsi": {"activo": g.get("rsi_activo", False), "compra_max": g.get("rsi_compra_max", 70), "venta_min": g.get("rsi_venta_min", 30)},
+            "macd": {"activo": g.get("macd_activo", False)},
+            "bollinger": {"activo": g.get("bollinger_activo", False), "compra_max": g.get("bollinger_compra_max", 0.95)},
+            "atr_volatilidad": {"activo": g.get("atr_activo", False), "max_atr_pct": g.get("atr_max_pct", 2.0)},
+            "volumen": {"activo": g.get("volumen_activo", False), "min_volume_norm": g.get("volumen_min", 0.5)},
+            "ema_tendencia": {"activo": g.get("ema_tendencia_activo", False)},
+            "vwap_spread": {"activo": g.get("vwap_spread_activo", False), "max_spread_pct": g.get("vwap_max_spread", 2.0)},
+            "sentiment": {"activo": g.get("sentiment_activo", False), "min_score": g.get("sentiment_min_score", 0.0)},
+            "horario_mercado": {"activo": g.get("horario_mercado_activo", True)},
+            "posicion_abierta": {"activo": g.get("posicion_abierta", True)},
+            "max_posiciones": {"activo": g.get("max_posiciones_activo", False), "valor": g.get("max_posiciones_valor", 3)},
+            "ordenes_diarias_max": {"activo": g.get("ordenes_diarias_activo", False), "valor": g.get("ordenes_diarias_valor", 5)},
+            "circuit_breaker": {"activo": g.get("circuit_breaker", False)},
         },
     }
     tmp = Path(tempfile.mktemp(suffix=".yaml", prefix="backtest_"))
@@ -174,13 +188,12 @@ async def health():
 @app.get("/api/tickers")
 async def list_tickers():
     """Los 16 tickers del universo + flag de si tienen datos."""
-    # Tickers con datos en silver_features
     tickers_with_data: set[str] = set()
-    for tf in ["1m", "5m", "15m"]:
+    for ticker in ALL_SYMBOLS:
         try:
-            resp = sb.table(f"silver_features_{tf}").select("ticker").limit(1000).execute()
-            for r in (resp.data or []):
-                tickers_with_data.add(r["ticker"])
+            resp = sb.table("silver_features_1m").select("ticker").eq("ticker", ticker).limit(1).execute()
+            if resp.data:
+                tickers_with_data.add(ticker)
         except Exception:
             pass
 
@@ -273,13 +286,16 @@ async def get_candles_historical(ticker: str = "AAPL", date: str = "", timeframe
 # ── Endpoints: Models ────────────────────────────────────────────────────────
 
 @app.get("/api/models")
-async def list_models():
-    resp = (
+async def list_models(ticker: str = ""):
+    """Lista modelos activos, opcionalmente filtrados por ticker."""
+    query = (
         sb.table("silver_model_registry")
         .select("experiment_name,model_name,version,is_active,status,metrics_summary,training_duration,created_at,feature_columns,ticker,timeframe")
         .eq("is_active", True).eq("status", "complete")
-        .order("created_at", desc=True).execute()
     )
+    if ticker:
+        query = query.eq("ticker", ticker)
+    resp = query.order("created_at", desc=True).execute()
     return {"models": resp.data or []}
 
 
